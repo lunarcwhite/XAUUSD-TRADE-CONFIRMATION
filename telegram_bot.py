@@ -21,6 +21,14 @@ def set_authorized_chats(chats):
     _AUTHORIZED_CHATS = {str(c) for c in chats if str(c)}
 
 
+def add_authorized_chat(chat_id):
+    _AUTHORIZED_CHATS.add(str(chat_id))
+
+
+def remove_authorized_chat(chat_id):
+    _AUTHORIZED_CHATS.discard(str(chat_id))
+
+
 def send_text_to(chat_id, message):
     """Kirim teks ke chat tertentu (multi-user)."""
     try:
@@ -101,11 +109,13 @@ def register_trade(trade_id, trade):
         pending_trades[trade_id] = trade
 
 
-def telegram_button_listener(on_execute, on_command=None):
+def telegram_button_listener(on_execute, on_command=None, on_text=None):
     """Long-poll getUpdates.
 
     on_execute(trade) -> (ok, detail). Trade test (/test) tidak dieksekusi.
-    on_command(chat_id, command) -> reply str | None. Guard user + 300 dtk.
+    on_command(chat_id, command) -> reply str | None (command /xxx).
+    on_text(chat_id, text) -> reply str | None (pesan biasa, cth. onboarding).
+    Guard user + 300 dtk.
     """
     print("🤖 Telegram listener aktif...")
     offset = 0
@@ -116,19 +126,32 @@ def telegram_button_listener(on_execute, on_command=None):
                              timeout=25).json()
             for item in r.get("result", []):
                 offset = item["update_id"] + 1
-                if "message" in item and on_command is not None:
+                if "message" in item and (on_command is not None or on_text is not None):
                     msg = item["message"]
                     text = (msg.get("text") or "").strip()
+                    if not text:
+                        continue
+                    chat_id = msg["chat"]["id"]
                     if text.startswith("/"):
-                        chat_id = msg["chat"]["id"]
-                        if _AUTHORIZED_CHATS and str(chat_id) not in _AUTHORIZED_CHATS:
-                            send_text_to(chat_id, "⛔ Unauthorized.")
+                        if on_command is None:
                             continue
                         cmd = text.split()[0].split("@")[0].lower()
+                        # /start selalu diteruskan (pintu onboarding user baru).
+                        if cmd not in ("/start",) and _AUTHORIZED_CHATS \
+                                and str(chat_id) not in _AUTHORIZED_CHATS:
+                            send_text_to(chat_id, "⛔ Unauthorized.")
+                            continue
                         try:
                             reply = on_command(str(chat_id), cmd)
                         except Exception as e:
                             reply = f"Command gagal: {e}"
+                        if reply:
+                            send_text_to(chat_id, reply)
+                    elif on_text is not None:
+                        try:
+                            reply = on_text(str(chat_id), text)
+                        except Exception as e:
+                            reply = f"Gagal: {e}"
                         if reply:
                             send_text_to(chat_id, reply)
                     continue

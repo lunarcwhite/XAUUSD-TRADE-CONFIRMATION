@@ -136,6 +136,17 @@ def active_symbol():
     return SYMBOL
 
 
+# ================= REGISTRASI MANDIRI =================
+# true = siapa pun yang /start bisa daftar pakai akun broker sendiri.
+# false = hanya chat di USERS_JSON/users.json (minta ke admin).
+OPEN_REGISTRATION = os.getenv("OPEN_REGISTRATION", "true").strip().lower() not in {"0", "false", "no"}
+# Admin = chat pertama (kompatibel TELEGRAM_CHAT_ID lama) + tambahan opsional.
+ADMIN_CHAT_IDS = {str(TELEGRAM_CHAT_ID)} if TELEGRAM_CHAT_ID else set()
+_ADMIN_EXTRA = os.getenv("ADMIN_CHAT_IDS", "").strip()
+if _ADMIN_EXTRA:
+    ADMIN_CHAT_IDS |= {c.strip() for c in _ADMIN_EXTRA.replace(";", ",").split(",") if c.strip()}
+USERS_DB = os.getenv("USERS_DB", "bot_users.db")
+
 # ================= MULTI-USER =================
 # Tanpa users.json → single-user lama (1 chat + 1 broker dari .env).
 # Dengan users.json → tiap user punya chat + broker + risiko sendiri.

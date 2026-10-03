@@ -208,13 +208,13 @@ def daily_reporter(send_text, send_photo):
         time.sleep(30)
 
 
-def daily_reporter_generic(broker, send_text, send_photo, user_id="default"):
+def daily_reporter_generic(broker, send_text, send_photo, user_id="default", stop_event=None):
     """Reporter generik MT5/OANDA per-user. Sync via broker.fetch_closed()."""
     init_db()
     label = getattr(broker, "name", "broker").upper()
     print(f"📊 Daily reporter aktif [{label}:{user_id}] (23:55 WIB)...")
     last_day = None
-    while True:
+    while stop_event is None or not stop_event.is_set():
         now = datetime.now(LOCAL_TZ)
         if now.hour == 23 and now.minute >= 55 and last_day != now.date():
             print(f"[REPORT:{user_id}] Menyusun laporan...")

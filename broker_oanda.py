@@ -56,6 +56,16 @@ class OandaAdapter(BrokerAdapter):
             print(f"[ERROR] OANDA init: {e}")
             return False
 
+    def list_accounts(self):
+        """List account IDs milik token. Dipakai onboarding /start."""
+        try:
+            r = self._s.get(f"{self.base}/accounts", timeout=10)
+            if r.status_code != 200:
+                return []
+            return [a.get("id") for a in r.json().get("accounts", []) if a.get("id")]
+        except Exception:
+            return []
+
     # ---------- data ----------
     def get_rates_m15(self, symbol: str | None = None, count: int = 100):
         inst = symbol or self.instrument

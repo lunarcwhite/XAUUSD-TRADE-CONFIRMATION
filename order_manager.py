@@ -167,10 +167,10 @@ def make_execute_via_broker(broker):
     return _exec
 
 
-def generic_position_lifecycle_manager(broker, send_text, symbol=None):
+def generic_position_lifecycle_manager(broker, send_text, symbol=None, stop_event=None):
     """Lifecycle broker-agnostic: Partial 50% + BE di 1:1, trailing $2.00/step $0.50."""
     print(f"🚀 Lifecycle manager aktif [{getattr(broker, 'name', '?')}] ...")
-    while True:
+    while stop_event is None or not stop_event.is_set():
         try:
             positions = broker.list_positions(symbol) if symbol else broker.list_positions()
             live = {str(p.ticket) for p in positions}
