@@ -100,6 +100,10 @@ def create_broker(mode: str | None = None) -> BrokerAdapter:
     from config import BROKER_MODE
 
     m = (mode or BROKER_MODE or "mt5").lower()
+    if m == "paper":
+        from broker_paper import PaperAdapter
+
+        return PaperAdapter()
     if m == "oanda":
         from broker_oanda import OandaAdapter
 
@@ -113,7 +117,10 @@ def create_broker_for_user(user: dict) -> BrokerAdapter:
     """Factory per-user multi-user. user dari config.load_users()."""
     mode = str(user.get("broker_mode") or "mt5").lower()
     risk = user.get("risk_percent")
-    if mode == "oanda":
+    if mode == "paper":
+        from broker_paper import PaperAdapter
+
+        return PaperAdapter(risk_percent=float(risk) if risk else None)
         from broker_oanda import OandaAdapter
 
         b = OandaAdapter(

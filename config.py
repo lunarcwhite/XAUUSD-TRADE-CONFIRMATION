@@ -50,6 +50,8 @@ def validate_config():
         missing.append("TELEGRAM_BOT_TOKEN")
     if _is_placeholder(TELEGRAM_CHAT_ID):
         missing.append("TELEGRAM_CHAT_ID")
+    if BROKER_MODE == "paper":
+        return missing  # paper hanya butuh Telegram
     if BROKER_MODE == "oanda":
         if _is_placeholder(OANDA_API_KEY):
             missing.append("OANDA_API_KEY")
@@ -72,7 +74,15 @@ def validate_config():
 # ================= MODE BROKER =================
 # "mt5" = terminal desktop Windows (default, kompatibel lama).
 # "oanda" = REST API key (practice/demo atau live, tanpa terminal, cross-OS).
+# "paper" = simulasi tanpa broker (feed Yahoo GC=F, uang virtual, untuk tes win rate).
 BROKER_MODE = os.getenv("BROKER_MODE", "mt5").strip().lower() or "mt5"
+
+# ================= PAPER (simulasi, tanpa kredensial) =================
+try:
+    PAPER_BALANCE = float(os.getenv("PAPER_BALANCE", "10000") or 10000)
+except ValueError:
+    PAPER_BALANCE = 10000.0
+PAPER_YAHOO_SYMBOL = os.getenv("PAPER_YAHOO_SYMBOL", "GC=F").strip() or "GC=F"
 
 # ================= KREDENSIAL OANDA v20 =================
 # Demo/testing: daftar practice di OANDA, dapat API token + Account ID.
@@ -203,4 +213,4 @@ def user_symbol(user):
         return user["symbol"]
     if (user.get("broker_mode") or "mt5") == "oanda":
         return user.get("oanda_instrument") or OANDA_INSTRUMENT
-    return SYMBOL
+    return SYMBOL  # mt5 + paper tampil sebagai XAUUSD

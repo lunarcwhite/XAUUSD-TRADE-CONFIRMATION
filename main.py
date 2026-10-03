@@ -89,8 +89,9 @@ def broadcast_signal(sessions, signal, entry, sl, tp, reason, df):
                 lot = 0.01
             risk_pct = float(user.get("risk_percent", 0.01) or 0.01) * 100
             trade_id = f"{user['id']}:tr_{base}_{i}"
+            paper_note = "\n🧪 *PAPER — uang virtual, tanpa eksekusi real*" if broker.name == "paper" else ""
             caption = (
-                f"🎯 *SINYAL {s['symbol']} {signal} [{broker.name}]*\n━━━━\n"
+                f"🎯 *SINYAL {s['symbol']} {signal} [{broker.name}]*{paper_note}\n━━━━\n"
                 f"📌 {reason}\n"
                 f"💵 Entry `{entry:.2f}` | 🛑 SL `{sl:.2f}` | 🎯 TP `{tp:.2f}` (1:{rr})\n"
                 f"⚖️ Lot `{lot}` (risiko {risk_pct:g}%)\n━━━━\n"
