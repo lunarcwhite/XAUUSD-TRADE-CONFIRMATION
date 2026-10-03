@@ -1,6 +1,6 @@
 pandas>=2.0
 numpy>=1.24
-mplfinance>=0.12
+mplfinance==0.12.10b0
 matplotlib>=3.7
 requests>=2.31
 MetaTrader5>=5.0.45; sys_platform == "win32"
