@@ -52,8 +52,8 @@ def send_text(message):
 def send_photo_to(chat_id, image_path, caption, trade_id):
     """Kirim chart + tombol ke chat tertentu. Return message_id."""
     keyboard = {"inline_keyboard": [[
-        {"text": "🟢 Buka Posisi", "callback_data": f"exec:{trade_id}"},
-        {"text": "🔴 Abaikan", "callback_data": f"ignore:{trade_id}"},
+        {"text": "🟢 EKSEKUSI ORDER", "callback_data": f"exec:{trade_id}"},
+        {"text": "🔴 ABAIKAN", "callback_data": f"ignore:{trade_id}"},
     ]]}
     try:
         with open(image_path, "rb") as photo:
