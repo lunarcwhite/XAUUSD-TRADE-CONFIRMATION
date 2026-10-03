@@ -1,0 +1,23 @@
+[
+  {
+    "id": "budi",
+    "telegram_chat_id": "123456789",
+    "broker_mode": "oanda",
+    "risk_percent": 0.01,
+    "oanda_api_key": "PASTE_TOKEN_PRACTICE",
+    "oanda_account_id": "101-001-100000-001",
+    "oanda_env": "practice",
+    "oanda_instrument": "XAU_USD",
+    "enabled": true
+  },
+  {
+    "id": "sari",
+    "telegram_chat_id": "987654321",
+    "broker_mode": "mt5",
+    "risk_percent": 0.005,
+    "mt5_login": 12345678,
+    "mt5_password": "PASSWORD",
+    "mt5_server": "Broker-Demo",
+    "enabled": true
+  }
+]
