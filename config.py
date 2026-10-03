@@ -108,6 +108,12 @@ BE_BUFFER = 0.20  # $0.20 di atas/bawah entry
 TRAILING_DISTANCE = 2.00  # $2.00 di belakang harga
 TRAILING_STEP = 0.50  # update SL min $0.50 (anti-spam)
 
+# ================= RISK GOVERNOR =================
+# Anti-overtrading untuk router 4-cabang (agregat sinyal lebih sering).
+MAX_OPEN_POSITIONS = 1  # maks posisi terbuka per user sebelum sinyal baru diblokir
+SIGNAL_COOLDOWN_MINUTES = 60  # jeda minimum antar sinyal per user
+DAILY_MAX_LOSS_PCT = 0.03  # blokir sinyal baru bila rugi terealisasi hari ini >= 3% balance
+
 # ================= SESI & NEWS =================
 LOCAL_TZ = ZoneInfo("Asia/Jakarta")
 FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"

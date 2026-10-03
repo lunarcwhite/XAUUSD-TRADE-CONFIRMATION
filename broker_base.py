@@ -40,6 +40,15 @@ class BrokerAdapter(ABC):
         """Return pandas DataFrame: time,open,high,low,close,tick_volume. time=epoch detik."""
         raise NotImplementedError
 
+    # ---------- Multi-Timeframe (MTF) ----------
+    # timeframe: M1,M5,M15,H1,H4,D1. Default via get_rates_m15 untuk kompat lama.
+    def get_rates(self, symbol: str, timeframe: str = "M15", count: int = 100):
+        tf = (timeframe or "M15").upper()
+        if tf == "M15":
+            return self.get_rates_m15(symbol, count)
+        # Adapter lama tanpa override -> fallback M15 agar tidak crash.
+        return self.get_rates_m15(symbol, count)
+
     @abstractmethod
     def get_balance(self) -> float:
         raise NotImplementedError
@@ -121,6 +130,7 @@ def create_broker_for_user(user: dict) -> BrokerAdapter:
         from broker_paper import PaperAdapter
 
         return PaperAdapter(risk_percent=float(risk) if risk else None)
+    if mode == "oanda":
         from broker_oanda import OandaAdapter
 
         b = OandaAdapter(

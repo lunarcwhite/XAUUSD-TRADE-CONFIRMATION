@@ -48,8 +48,20 @@ class MT5Adapter(BrokerAdapter):
             pass
 
     def get_rates_m15(self, symbol: str, count: int = 100):
+        return self.get_rates(symbol, "M15", count)
+
+    def get_rates(self, symbol: str, timeframe: str = "M15", count: int = 100):
         mt5 = _mt5()
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, count)
+        tf_map = {
+            "M1": mt5.TIMEFRAME_M1,
+            "M5": mt5.TIMEFRAME_M5,
+            "M15": mt5.TIMEFRAME_M15,
+            "H1": mt5.TIMEFRAME_H1,
+            "H4": mt5.TIMEFRAME_H4,
+            "D1": mt5.TIMEFRAME_D1,
+        }
+        tf = tf_map.get((timeframe or "M15").upper(), mt5.TIMEFRAME_M15)
+        rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
         if rates is None:
             return None
         return pd.DataFrame(rates)

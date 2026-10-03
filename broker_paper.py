@@ -45,36 +45,66 @@ class PaperAdapter(BrokerAdapter):
         return True
 
     # ---------- data ----------
-    def get_rates_m15(self, symbol: str = "XAUUSD", count: int = 100):
+    def _yahoo_fetch(self, interval: str, range_: str):
+        import requests as _rq
+
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{self.yahoo_symbol or 'GC=F'}"
+        r = _rq.get(url, params={"interval": interval, "range": range_},
+                    headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        r.raise_for_status()
+        res = r.json()["chart"]["result"][0]
+        ts = res["timestamp"]
+        q = res["indicators"]["quote"][0]
+        rows = []
+        for i in range(len(ts)):
+            c, o, h, low = q["close"][i], q["open"][i], q["high"][i], q["low"][i]
+            if c is None or o is None or h is None or low is None:
+                continue
+            rows.append({
+                "time": int(ts[i]),
+                "open": float(o), "high": float(h),
+                "low": float(low), "close": float(c),
+                "tick_volume": int((q.get("volume") or [0])[i] or 0),
+            })
+        return rows
+
+    def get_rates(self, symbol: str = "XAUUSD", timeframe: str = "M15", count: int = 100):
+        tf = (timeframe or "M15").upper()
         try:
-            r = requests.get(
-                YAHOO_URL, params={"interval": "15m", "range": "5d"},
-                headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-            r.raise_for_status()
-            res = r.json()["chart"]["result"][0]
-            ts = res["timestamp"]
-            q = res["indicators"]["quote"][0]
-            rows = []
-            for i in range(len(ts)):
-                c, o, h, low = q["close"][i], q["open"][i], q["high"][i], q["low"][i]
-                if c is None or o is None or h is None or low is None:
-                    continue  # bar belum terbentuk / market tutup
-                rows.append({
-                    "time": int(ts[i]),
-                    "open": float(o), "high": float(h),
-                    "low": float(low), "close": float(c),
-                    "tick_volume": int((q.get("volume") or [0])[i] or 0),
-                })
-            if len(rows) < 60:
+            if tf == "M1":
+                rows = self._yahoo_fetch("1m", "5d")
+            elif tf == "M5":
+                rows = self._yahoo_fetch("5m", "5d")
+            elif tf == "H1":
+                rows = self._yahoo_fetch("60m", "1mo")
+            elif tf == "H4":
+                rows = self._yahoo_fetch("60m", "3mo")
+                if len(rows) >= 4:
+                    df1 = pd.DataFrame(rows)
+                    df1["dt"] = pd.to_datetime(df1["time"], unit="s", utc=True)
+                    df1.set_index("dt", inplace=True)
+                    agg = {"open": "first", "high": "max", "low": "min",
+                           "close": "last", "tick_volume": "sum", "time": "first"}
+                    df4 = df1.resample("4h").agg(agg).dropna().reset_index(drop=True)
+                    rows = df4.to_dict("records")
+            elif tf == "D1":
+                rows = self._yahoo_fetch("1d", "6mo")
+            else:  # M15 default
+                rows = self._yahoo_fetch("15m", "5d")
+            if not rows or len(rows) < 5:
                 return None
             df = pd.DataFrame(rows[-int(count):]).reset_index(drop=True)
-            with self._lock:
-                self._last_close = float(df.iloc[-1]["close"])
-            self._simulate_fills(df)
+            if tf == "M15":
+                with self._lock:
+                    self._last_close = float(df.iloc[-1]["close"])
+                self._simulate_fills(df)
             return df
         except Exception as e:
-            print(f"[ERROR] paper feed: {e}")
+            print(f"[ERROR] paper feed {tf}: {e}")
             return None
+
+    def get_rates_m15(self, symbol: str = "XAUUSD", count: int = 100):
+        return self.get_rates(symbol, "M15", count)
 
     def get_balance(self) -> float:
         with self._lock:

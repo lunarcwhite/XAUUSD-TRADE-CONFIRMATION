@@ -27,6 +27,13 @@ def init_db():
             conn.execute("ALTER TABLE trade_history ADD COLUMN user_id TEXT DEFAULT 'default'")
     except Exception:
         pass
+    # PRD V2: catat strategi pemicu (session_sweep / trend_pullback).
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(trade_history)")]
+        if "strategy" not in cols:
+            conn.execute("ALTER TABLE trade_history ADD COLUMN strategy TEXT DEFAULT ''")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -66,22 +73,36 @@ def insert_closed_rows(rows, user_id="default"):
     for r in rows:
         try:
             uid = r.get("user_id") or user_id
+            strat = r.get("strategy") or ""
             try:
                 cur.execute(
                     """INSERT OR IGNORE INTO trade_history
                        (deal_ticket, position_ticket, symbol, trade_type, volume,
-                        close_time, close_price, profit, commission, swap, net_profit, user_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        close_time, close_price, profit, commission, swap, net_profit, user_id, strategy)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (r["deal_ticket"], r.get("position_ticket"), r.get("symbol"),
                      r.get("trade_type"), r.get("volume"), r.get("close_time"),
                      r.get("close_price"), r.get("profit"), r.get("commission"),
-                     r.get("swap"), r.get("net_profit"), uid),
+                     r.get("swap"), r.get("net_profit"), uid, strat),
                 )
             except sqlite3.OperationalError:
-                # DB lama tanpa kolom user_id
-                cur.execute(
-                    """INSERT OR IGNORE INTO trade_history VALUES
-                       (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                # Kompat skema lama: coba tanpa strategy, lalu skema orisinal 11 kolom.
+                try:
+                    cur.execute(
+                        """INSERT OR IGNORE INTO trade_history
+                           (deal_ticket, position_ticket, symbol, trade_type, volume,
+                            close_time, close_price, profit, commission, swap, net_profit, user_id)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (r["deal_ticket"], r.get("position_ticket"), r.get("symbol"),
+                         r.get("trade_type"), r.get("volume"), r.get("close_time"),
+                         r.get("close_price"), r.get("profit"), r.get("commission"),
+                         r.get("swap"), r.get("net_profit"), uid),
+                    )
+                except sqlite3.OperationalError:
+                    # DB lama tanpa kolom user_id
+                    cur.execute(
+                        """INSERT OR IGNORE INTO trade_history VALUES
+                           (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (r["deal_ticket"], r.get("position_ticket"), r.get("symbol"),
                      r.get("trade_type"), r.get("volume"), r.get("close_time"),
                      r.get("close_price"), r.get("profit"), r.get("commission"),

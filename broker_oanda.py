@@ -68,6 +68,12 @@ class OandaAdapter(BrokerAdapter):
 
     # ---------- data ----------
     def get_rates_m15(self, symbol: str | None = None, count: int = 100):
+        return self.get_rates(symbol, "M15", count)
+
+    def get_rates(self, symbol: str | None = None, timeframe: str = "M15", count: int = 100):
+        gran_map = {"M1": "M1", "M5": "M5", "M15": "M15",
+                    "H1": "H1", "H4": "H4", "D1": "D"}
+        gran = gran_map.get((timeframe or "M15").upper(), "M15")
         inst = symbol or self.instrument
         # OANDA pakai XAU_USD; terima juga XAUUSD dari kode lama.
         if inst == "XAUUSD":
@@ -75,7 +81,7 @@ class OandaAdapter(BrokerAdapter):
         try:
             r = self._s.get(
                 f"{self.base}/accounts/{self.account_id}/instruments/{inst}/candles",
-                params={"granularity": "M15", "count": min(int(count), 5000), "price": "M"},
+                params={"granularity": gran, "count": min(int(count), 5000), "price": "M"},
                 timeout=15)
             r.raise_for_status()
             rows = []
