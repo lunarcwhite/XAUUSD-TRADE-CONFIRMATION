@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: xauusd-bot
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: BROKER_MODE
+        value: oanda
+      - key: OANDA_ENV
+        value: practice
+      - key: OANDA_INSTRUMENT
+        value: XAU_USD
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: OANDA_API_KEY
+        sync: false
+      - key: OANDA_ACCOUNT_ID
+        sync: false
+      - key: USERS_JSON
+        sync: false

@@ -43,6 +43,31 @@ def _validate_users(users):
     return problems
 
 
+def start_health_server():
+    """HTTP mini agar Render Web Service free lolos health check. Aktif bila PORT di-set."""
+    port = int(os.getenv("PORT", "0") or 0)
+    if not port:
+        return None
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("0.0.0.0", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    print(f"[health] :{port}")
+    return srv
+
+
 def broadcast_signal(sessions, signal, entry, sl, tp, reason, df):
     """Kirim 1 sinyal ke semua user; lot dihitung per-broker/risk masing-masing."""
     rr = round(abs(tp - entry) / abs(entry - sl), 1) if abs(entry - sl) > 0 else 0.0
@@ -87,6 +112,7 @@ def broadcast_signal(sessions, signal, entry, sl, tp, reason, df):
 
 
 def main():
+    start_health_server()
     users = load_users()
     # Fallback validasi single-user lama bila hanya default.
     if len(users) == 1 and users[0]["id"] == "default" and not os.getenv("USERS_JSON", "").strip():
