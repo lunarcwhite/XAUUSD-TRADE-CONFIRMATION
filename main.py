@@ -18,6 +18,8 @@ from news_guard import fetch_high_impact_usd_events, is_in_news_blackout
 from strategy import add_indicators, evaluate_session_strategy
 from chart_engine import generate_signal_chart
 from telegram_bot import (
+    _lock as _pending_lock,
+    pending_trades,
     register_trade,
     send_photo_to,
     send_text_to,
@@ -145,6 +147,7 @@ def main():
         return
 
     brokers_by_user = {s["user"]["id"]: s["broker"] for s in sessions}
+    sessions_by_chat = {str(s["user"]["telegram_chat_id"]): s for s in sessions}
 
     def on_execute(trade):
         b = brokers_by_user.get(trade.get("user_id"))
@@ -158,7 +161,70 @@ def main():
         except Exception as e:
             return False, f"Eksekusi gagal: {e}"
 
-    threading.Thread(target=telegram_button_listener, args=(on_execute,), daemon=True).start()
+    def on_command(chat_id, cmd):
+        s = sessions_by_chat.get(str(chat_id))
+        if s is None:
+            return "⛔ Unauthorized."
+        user, broker, sym = s["user"], s["broker"], s["symbol"]
+        if cmd in ("/start", "/help"):
+            return (
+                f"🤖 *XAUUSD Bot [{broker.name}]*\n━━━━\n"
+                f"Mode `{user['broker_mode']}` | Symbol `{sym}`\n"
+                f"Window 14:00-23:00 WIB, approve 5 mnt.\n━━━━\n"
+                f"/status — saldo, posisi, sinyal pending\n"
+                f"/test — contoh sinyal + tombol (tanpa eksekusi)")
+        if cmd == "/status":
+            try:
+                bal = broker.get_balance()
+            except Exception:
+                bal = 0.0
+            try:
+                poss = broker.list_positions(sym)
+            except Exception:
+                poss = []
+            with _pending_lock:
+                pend = sum(1 for t in pending_trades.values()
+                           if str(t.get("chat_id")) == str(chat_id))
+            lines = [
+                f"📊 *STATUS [{user['id']}:{broker.name}]*",
+                f"🏦 Saldo: `${bal:,.2f}`",
+                f"📌 Posisi terbuka: `{len(poss)}`",
+            ]
+            for p in poss[:5]:
+                lines.append(f"• #{p.ticket} {p.side} {p.volume_lot} @ `{p.price_open:.2f}` SL `{p.sl:.2f}`")
+            lines.append(f"⏳ Sinyal pending: `{pend}`")
+            return "\n".join(lines)
+        if cmd == "/test":
+            feed = sessions[0]
+            df = feed["broker"].get_rates_m15(feed["symbol"], 100)
+            if df is None or len(df) < 60:
+                return "Feed belum siap, coba lagi sebentar."
+            df = add_indicators(df)
+            entry = float(df.iloc[-2]["close"])
+            sl, tp = entry - 5.0, entry + 10.0
+            img = f"test_{int(time.time())}.png"
+            try:
+                generate_signal_chart(df, entry, sl, tp, sym, filename=img)
+            except Exception as e:
+                return f"Gagal buat chart: {e}"
+            trade_id = f"{user['id']}:test_{int(time.time())}"
+            caption = (f"🧪 *TEST {sym} BUY [{broker.name}]*\n━━━━\n"
+                       f"Contoh tampilan sinyal. Approve = TEST OK, tanpa eksekusi.")
+            msg_id = send_photo_to(chat_id, img, caption, trade_id)
+            if os.path.exists(img):
+                os.remove(img)
+            if not msg_id:
+                return "Gagal kirim chart test."
+            register_trade(trade_id, {
+                "user_id": user["id"], "test": True,
+                "symbol": sym, "action": "BUY", "entry": entry,
+                "sl": sl, "tp": tp, "lot": 0.01,
+                "created_at": datetime.now(), "chat_id": chat_id,
+                "message_id": msg_id, "caption": caption})
+            return None  # chart sudah terkirim
+        return "Perintah tak dikenal. /help"
+
+    threading.Thread(target=telegram_button_listener, args=(on_execute, on_command), daemon=True).start()
     threading.Thread(target=trade_expiry_cleaner, daemon=True).start()
     for s in sessions:
         u, b, sym = s["user"], s["broker"], s["symbol"]

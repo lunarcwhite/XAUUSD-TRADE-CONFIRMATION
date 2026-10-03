@@ -101,8 +101,12 @@ def register_trade(trade_id, trade):
         pending_trades[trade_id] = trade
 
 
-def telegram_button_listener(on_execute):
-    """Long-poll getUpdates; on_execute(trade) -> (ok, detail). Guard user + 300 dtk."""
+def telegram_button_listener(on_execute, on_command=None):
+    """Long-poll getUpdates.
+
+    on_execute(trade) -> (ok, detail). Trade test (/test) tidak dieksekusi.
+    on_command(chat_id, command) -> reply str | None. Guard user + 300 dtk.
+    """
     print("🤖 Telegram listener aktif...")
     offset = 0
     while True:
@@ -112,6 +116,22 @@ def telegram_button_listener(on_execute):
                              timeout=25).json()
             for item in r.get("result", []):
                 offset = item["update_id"] + 1
+                if "message" in item and on_command is not None:
+                    msg = item["message"]
+                    text = (msg.get("text") or "").strip()
+                    if text.startswith("/"):
+                        chat_id = msg["chat"]["id"]
+                        if _AUTHORIZED_CHATS and str(chat_id) not in _AUTHORIZED_CHATS:
+                            send_text_to(chat_id, "⛔ Unauthorized.")
+                            continue
+                        cmd = text.split()[0].split("@")[0].lower()
+                        try:
+                            reply = on_command(str(chat_id), cmd)
+                        except Exception as e:
+                            reply = f"Command gagal: {e}"
+                        if reply:
+                            send_text_to(chat_id, reply)
+                    continue
                 if "callback_query" not in item:
                     continue
                 cb = item["callback_query"]
@@ -141,6 +161,13 @@ def telegram_button_listener(on_execute):
                     continue
 
                 if action == "exec":
+                    if trade.get("test"):
+                        answer_callback(cb["id"], "Test OK.")
+                        edit_caption(chat_id, msg_id,
+                                     f"{caption}\n\n━━━━\n✅ *STATUS: TEST OK (tidak dieksekusi)*")
+                        with _lock:
+                            pending_trades.pop(trade_id, None)
+                        continue
                     answer_callback(cb["id"], "⏳ Eksekusi ke broker...")
                     ok, detail = on_execute(trade)
                     status = ("✅ *STATUS: DIEKSEKUSI*" if ok
