@@ -112,6 +112,7 @@ TRAILING_STEP = 0.50  # update SL min $0.50 (anti-spam)
 # Anti-overtrading untuk router 4-cabang (agregat sinyal lebih sering).
 MAX_OPEN_POSITIONS = 1  # maks posisi terbuka per user sebelum sinyal baru diblokir
 SIGNAL_COOLDOWN_MINUTES = 60  # jeda minimum antar sinyal per user
+POST_NEWS_COOLDOWN_MINUTES = 30  # jeda khusus antar sinyal post_news per user
 DAILY_MAX_LOSS_PCT = 0.03  # blokir sinyal baru bila rugi terealisasi hari ini >= 3% balance
 
 # ================= SESI & NEWS =================

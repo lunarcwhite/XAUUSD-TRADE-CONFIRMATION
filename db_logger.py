@@ -34,8 +34,45 @@ def init_db():
             conn.execute("ALTER TABLE trade_history ADD COLUMN strategy TEXT DEFAULT ''")
     except Exception:
         pass
+    # Jurnal keputusan approval: approve / ignore / expire per sinyal.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS signal_decisions (
+            trade_id TEXT PRIMARY KEY, user_id TEXT, strategy TEXT, regime TEXT,
+            signal TEXT, entry REAL, sl REAL, tp REAL, lot REAL,
+            created_at TEXT, decided_at TEXT, decision TEXT, detail TEXT)"""
+    )
     conn.commit()
     conn.close()
+
+
+def log_signal(trade_id, info, decision="pending", detail=""):
+    """Catat/update keputusan sinyal. decision: pending/approved/ignored/expired."""
+    try:
+        from config import LOCAL_TZ as _TZ
+        now_s = datetime.now(_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        conn.execute(
+            """INSERT INTO signal_decisions
+               (trade_id, user_id, strategy, regime, signal, entry, sl, tp, lot,
+                created_at, decided_at, decision, detail)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(trade_id) DO UPDATE SET
+                 decided_at=excluded.decided_at, decision=excluded.decision,
+                 detail=excluded.detail""",
+            (str(trade_id), str(info.get("user_id", "")),
+             str(info.get("strategy", "")), str(info.get("regime", "")),
+             str(info.get("action", info.get("signal", ""))),
+             float(info.get("entry", 0) or 0), float(info.get("sl", 0) or 0),
+             float(info.get("tp", 0) or 0), float(info.get("lot", 0) or 0),
+             str(info.get("created_at", now_s)), now_s, decision, detail),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[WARN] jurnal keputusan: {e}")
 
 
 def sync_closed_deals_to_sqlite(days_back=7):

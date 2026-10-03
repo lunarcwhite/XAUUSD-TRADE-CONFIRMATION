@@ -6,11 +6,15 @@ from datetime import datetime
 
 
 def has_open_position(broker, symbol) -> tuple[bool, str]:
-    """True bila ada posisi terbuka (maks 1). Return (blocked, detail)."""
+    """True = blokir sinyal (ada posisi ATAU broker tak terjangkau -> fail-closed)."""
     try:
         poss = broker.list_positions(symbol) if symbol else broker.list_positions()
     except Exception as e:
-        return False, f"cek posisi gagal ({e}), fail-open"
+        # Fail-closed: koneksi broker putus -> jangan kirim sinyal baru selagi
+        # posisi real mungkin masih terbuka.
+        return True, f"broker tak terjangkau ({e})"
+    if poss is None:
+        return True, "broker tak terjangkau (respon kosong)"
     if poss:
         t = getattr(poss[0], "ticket", "?")
         return True, f"sudah ada {len(poss)} posisi terbuka (#{t})"

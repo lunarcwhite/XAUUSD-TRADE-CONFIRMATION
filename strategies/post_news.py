@@ -18,6 +18,8 @@ import pandas as pd
 
 from config import LOCAL_TZ
 
+from strategies.indicators import atr_value, sl_buffer
+
 RSI_PERIOD = 14
 SL_BUF_NEWS, MIN_RISK, RR = 1.50, 0.75, 2.0
 POST_MIN_START, POST_MIN_END = 30, 120
@@ -78,6 +80,7 @@ def evaluate(m15_df, events=None, now=None):
     if m15_df is None or len(m15_df) < 60:
         return None, 0, 0, 0, "Post-news batal: M15 kurang"
     df = _add(m15_df)
+    buf = sl_buffer(atr_value(df), floor=SL_BUF_NEWS)  # SL lebar news, ikut ATR
     c1, c2, c3 = df.iloc[-2], df.iloc[-3], df.iloc[-4]
     try:
         closes = [float(c3["close"]), float(c2["close"]), float(c1["close"])]
@@ -95,7 +98,7 @@ def evaluate(m15_df, events=None, now=None):
     # BUY: momentum naik beruntun + di atas EMA21 + RSI>50 + candle bullish
     if closes[0] < closes[1] < closes[2] and entry > e21 and rc > 50 \
             and float(c1["close"]) > float(c1["open"]):
-        sl = min(float(c1["low"]), float(c2["low"]), float(c3["low"])) - SL_BUF_NEWS
+        sl = min(float(c1["low"]), float(c2["low"]), float(c3["low"])) - buf
         if entry - sl < MIN_RISK:
             return None, 0, 0, 0, "Post-news BUY batal: SL terlalu rapat"
         tp = entry + (entry - sl) * RR
@@ -104,7 +107,7 @@ def evaluate(m15_df, events=None, now=None):
     # SELL: mirror
     if closes[0] > closes[1] > closes[2] and entry < e21 and rc < 50 \
             and float(c1["close"]) < float(c1["open"]):
-        sl = max(float(c1["high"]), float(c2["high"]), float(c3["high"])) + SL_BUF_NEWS
+        sl = max(float(c1["high"]), float(c2["high"]), float(c3["high"])) + buf
         if sl - entry < MIN_RISK:
             return None, 0, 0, 0, "Post-news SELL batal: SL terlalu rapat"
         tp = entry - (sl - entry) * RR

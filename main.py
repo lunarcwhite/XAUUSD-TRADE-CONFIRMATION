@@ -21,14 +21,20 @@ from config import (
     LOCAL_TZ,
     MAX_OPEN_POSITIONS,
     OPEN_REGISTRATION,
+    POST_NEWS_COOLDOWN_MINUTES,
     SIGNAL_COOLDOWN_MINUTES,
     TELEGRAM_CHAT_ID,
     load_users,
     user_symbol,
     validate_config,
 )
-from news_guard import fetch_high_impact_usd_events, is_in_news_blackout
-from strategy import add_indicators, evaluate_mtf_strategy, evaluate_session_strategy
+from news_guard import (
+    fetch_high_impact_usd_events,
+    is_feed_stale,
+    is_in_news_blackout,
+    load_cache,
+)
+from strategy import add_indicators, evaluate_session_strategy
 from strategy_router import route as route_strategy
 import risk_governor
 from chart_engine import generate_signal_chart
@@ -54,6 +60,7 @@ SESS_LOCK = threading.Lock()
 REG: dict[str, dict] = {}  # chat_id -> {step, data, ts}
 REG_TTL = 600
 LAST_SIGNAL: dict[str, datetime] = {}  # user_id -> waktu sinyal terakhir (cooldown)
+LAST_POSTNEWS: dict[str, datetime] = {}  # user_id -> sinyal post_news terakhir
 
 
 def _validate_users(users):
@@ -181,8 +188,12 @@ def session_by_chat(chat_id):
 
 
 def broadcast_signal(sessions, signal, entry, sl, tp, reason, df,
-                       strategy="session_sweep", regime="RANGING", risk_mult=1.0):
+                       strategy="session_sweep", regime="RANGING", risk_mult=1.0,
+                       news_ok=True):
     """Kirim 1 sinyal ke semua user; lot dihitung per-broker/risk masing-masing."""
+    from datetime import timedelta as _td
+
+    from config import EXPIRY_SECONDS
     rr = round(abs(tp - entry) / abs(entry - sl), 1) if abs(entry - sl) > 0 else 0.0
     base = int(time.time())
     ref_symbol = sessions[0]["symbol"] if sessions else "XAUUSD"
@@ -202,6 +213,12 @@ def broadcast_signal(sessions, signal, entry, sl, tp, reason, df,
         print(f"[ERROR] chart: {e}")
         return
     try:
+        from config import LOCAL_TZ as _TZ
+        _now = datetime.now(_TZ)
+    except Exception:
+        _now = datetime.now()
+    expire_s = (_now + _td(seconds=EXPIRY_SECONDS)).strftime("%H:%M")
+    try:
         for i, s in enumerate(sessions):
             user, broker = s["user"], s["broker"]
             try:
@@ -212,6 +229,15 @@ def broadcast_signal(sessions, signal, entry, sl, tp, reason, df,
                 lot = 0.01
             base_risk = float(user.get("risk_percent", 0.01) or 0.01) * 100
             risk_pct = base_risk * (float(risk_mult) if risk_mult else 1.0)
+            # Snapshot governor agar approval tak perlu hitung sendiri.
+            try:
+                npos = len(broker.list_positions(s["symbol"]) or [])
+            except Exception:
+                npos = "?"
+            try:
+                daily = risk_governor.daily_realized(str(user["id"]))
+            except Exception:
+                daily = 0.0
             trade_id = f"{user['id']}:tr_{base}_{i}"
             paper_note = "\n🧪 *PAPER — uang virtual, tanpa eksekusi real*" if broker.name == "paper" else ""
             caption = (
@@ -219,17 +245,26 @@ def broadcast_signal(sessions, signal, entry, sl, tp, reason, df,
                 f"🧭 Rezim `{regime}` | Strategi `{strategy}`\n"
                 f"📌 {reason}\n"
                 f"💵 Entry `{entry:.2f}` | 🛑 SL `{sl:.2f}` | 🎯 TP `{tp:.2f}` (1:{rr})\n"
-                f"⚖️ Lot `{lot}` (risiko {risk_pct:g}%)\n━━━━\n"
+                f"⚖️ Lot `{lot}` (risiko {risk_pct:g}%)\n"
+                f"🕒 Berlaku s/d `{expire_s}`\n"
+                f"🛡️ Gov: pos `{npos}` · daily `{daily:+.2f}` · "
+                f"news `{'clear' if news_ok else 'BLOKIR?'}`\n━━━━\n"
                 f"Konfirmasi dalam 5 menit:")
             msg_id = send_photo_to(user["telegram_chat_id"], img, caption, trade_id)
             if msg_id:
-                register_trade(trade_id, {
+                info = {
                     "user_id": user["id"],
                     "strategy": strategy, "regime": regime,
                     "symbol": s["symbol"], "action": signal, "entry": entry,
                     "sl": sl, "tp": tp, "lot": lot,
                     "created_at": datetime.now(), "chat_id": user["telegram_chat_id"],
-                    "message_id": msg_id, "caption": caption})
+                    "message_id": msg_id, "caption": caption}
+                register_trade(trade_id, info)
+                try:
+                    from db_logger import log_signal
+                    log_signal(trade_id, info, decision="pending")
+                except Exception as e:
+                    print(f"[WARN] jurnal sinyal: {e}")
                 print(f"[SINYAL] {signal} {trade_id} -> {user['id']}.")
             else:
                 print(f"[ERROR] Gagal kirim sinyal ke {user['id']}.")
@@ -517,74 +552,98 @@ def main():
         now = datetime.now(LOCAL_TZ)
         six_am = now.replace(hour=6, minute=0, second=0, microsecond=0)
         if now >= six_am and main._last_fetch < six_am:  # PRD 4.1: refresh 06:00 WIB.
-            events_cache["events"] = fetch_high_impact_usd_events()
+            fresh = fetch_high_impact_usd_events()
+            if fresh:  # fail-closed: fetch gagal -> pertahankan kalender terakhir
+                events_cache["events"] = fresh
+                events_cache["fetched_at"] = now
+            else:
+                print("[WARN] refresh kalender gagal, pakai cache terakhir.")
             main._last_fetch = now
+        if is_feed_stale(events_cache.get("fetched_at")):
+            # Fail-closed: tanpa kalender segar, jangan trading buta saat news.
+            print("[SKIP] feed news basi (>48 jam), sinyal diblokir.")
+            time.sleep(60)
+            continue
         sessions = live_sessions()
         if not sessions:
             time.sleep(10)
             continue
-        feed = sessions[0]
-        mtf = _fetch_mtf(feed["broker"], feed["symbol"])
-        df = mtf.get("M15")
-        if df is None or len(df) < 60:
-            time.sleep(5)
-            continue
-        if df.iloc[-2]["time"] == getattr(main, "_last_bar", None):
-            time.sleep(10)
-            continue
-        main._last_bar = df.iloc[-2]["time"]
-        print(f"\n[{now:%H:%M:%S}] Bar M15 tutup, evaluasi rezim...")
-        df = add_indicators(df)
-        if "EMA21" not in df.columns:
-            df["EMA21"] = df["close"].ewm(span=21, adjust=False).mean()
-        blocked, title = is_in_news_blackout(events_cache["events"])
-        if blocked:
-            print(f"⛔ Blackout: {title}.")
-            time.sleep(10)
-            continue
-        try:
-            res = route_strategy(
-                mtf.get("H1"), df, events_cache.get("events"), now)
-            if len(res) == 8:
-                signal, entry, sl, tp, reason, regime, strategy, risk_mult = res
-            else:  # kompat router lama 7-tuple
-                signal, entry, sl, tp, reason, regime, strategy = res
-                risk_mult = 1.0
-            label = {"TRENDING": "Trend Pullback/Breakout",
-                     "POST_NEWS": "Post-News",
-                     "RANGING": "Session Sweep"}.get(regime, regime)
-            print(f"[REGIME] {reason.split(':')[0]}. Memeriksa {label}...")
-            # Kompat MTF lama: bila H1 kurang dari 60 bar, router fallback RANGING;
-            # biarkan sweep yang menentukan. Tidak ada fallback MTF 3-lapis di sini
-            # karena PRD V2 memakai router sebagai dispatcher utama.
-        except Exception as e:
-            print(f"[ERROR] router: {e}")
-            signal, entry, sl, tp, reason = evaluate_session_strategy(df)
-            regime, strategy, risk_mult = "RANGING", "session_sweep", 1.0
-        if signal:
-            eligible, skipped = [], []
-            for s in sessions:
-                ok, why = risk_governor.eligible(
-                    s, LAST_SIGNAL.get(s["user"]["id"]), now,
-                    cooldown_min=SIGNAL_COOLDOWN_MINUTES,
-                    max_loss_pct=DAILY_MAX_LOSS_PCT)
-                (eligible if ok else skipped).append((s, why))
-            for _, why in skipped:
-                print(f"[SKIP] {why}")
-            if not eligible:
-                print(f"[SKIP] {reason} (governor: semua user terblokir)")
+        # Multi-user: evaluasi per grup simbol (feed & harga per simbol, bukan
+        # satu feed untuk semua). Entry/SL/TP tiap grup dari feed-nya sendiri.
+        groups: dict[str, list] = {}
+        for s in sessions:
+            groups.setdefault(s["symbol"], []).append(s)
+        if not hasattr(main, "_last_bars"):
+            main._last_bars = {}
+        for symbol, gsessions in groups.items():
+            feed = gsessions[0]
+            mtf = _fetch_mtf(feed["broker"], symbol)
+            df = mtf.get("M15")
+            if df is None or len(df) < 60:
+                time.sleep(5)
+                continue
+            if df.iloc[-2]["time"] == main._last_bars.get(symbol):
+                continue
+            main._last_bars[symbol] = df.iloc[-2]["time"]
+            print(f"\n[{now:%H:%M:%S}] Bar M15 {symbol} tutup, evaluasi rezim...")
+            df = add_indicators(df)
+            if "EMA21" not in df.columns:
+                df["EMA21"] = df["close"].ewm(span=21, adjust=False).mean()
+            blocked, title = is_in_news_blackout(events_cache["events"])
+            if blocked:
+                print(f"⛔ Blackout: {title}.")
+                continue
+            try:
+                res = route_strategy(
+                    mtf.get("H1"), df, events_cache.get("events"), now)
+                if len(res) == 8:
+                    signal, entry, sl, tp, reason, regime, strategy, risk_mult = res
+                else:  # kompat router lama 7-tuple
+                    signal, entry, sl, tp, reason, regime, strategy = res
+                    risk_mult = 1.0
+                label = {"TRENDING": "Trend Pullback/Breakout",
+                         "POST_NEWS": "Post-News",
+                         "RANGING": "Session Sweep"}.get(regime, regime)
+                print(f"[REGIME] {reason.split(':')[0]}. Memeriksa {label}...")
+            except Exception as e:
+                print(f"[ERROR] router: {e}")
+                signal, entry, sl, tp, reason = evaluate_session_strategy(df)
+                regime, strategy, risk_mult = "RANGING", "session_sweep", 1.0
+            if signal:
+                eligible, skipped = [], []
+                for s in gsessions:
+                    uid = s["user"]["id"]
+                    if strategy == "post_news":
+                        # Guard FOMO: jeda khusus antar sinyal post_news (di atas
+                        # cooldown global 60 mnt yang tetap berlaku).
+                        remain = risk_governor.cooldown_remaining_minutes(
+                            LAST_POSTNEWS.get(uid), POST_NEWS_COOLDOWN_MINUTES, now)
+                        if remain > 0:
+                            skipped.append((s, f"GOV {uid}: post-news {remain:.0f}m lagi"))
+                            continue
+                    ok, why = risk_governor.eligible(
+                        s, LAST_SIGNAL.get(uid), now,
+                        cooldown_min=SIGNAL_COOLDOWN_MINUTES,
+                        max_loss_pct=DAILY_MAX_LOSS_PCT)
+                    (eligible if ok else skipped).append((s, why))
+                for _, why in skipped:
+                    print(f"[SKIP] {why}")
+                if not eligible:
+                    print(f"[SKIP] {reason} (governor: semua user terblokir)")
+                else:
+                    broadcast_signal([s for s, _ in eligible], signal, entry, sl,
+                                     tp, reason, df, strategy=strategy,
+                                     regime=regime, risk_mult=risk_mult)
+                    for s, _ in eligible:
+                        LAST_SIGNAL[s["user"]["id"]] = now
+                        if strategy == "post_news":
+                            LAST_POSTNEWS[s["user"]["id"]] = now
             else:
-                broadcast_signal([s for s, _ in eligible], signal, entry, sl,
-                                 tp, reason, df, strategy=strategy,
-                                 regime=regime, risk_mult=risk_mult)
-                for s, _ in eligible:
-                    LAST_SIGNAL[s["user"]["id"]] = now
-        else:
-            print(f"[SKIP] {reason}")
+                print(f"[SKIP] {reason}")
         time.sleep(10)
 
 
-events_cache = {"events": []}
+events_cache = {"events": [], "fetched_at": None}
 
 
 def send_photo_raw_to(chat_id, image_path, caption):
@@ -610,7 +669,21 @@ def send_photo_with_buttons_raw(image_path, caption):
 
 
 if __name__ == "__main__":
-    events_cache["events"] = fetch_high_impact_usd_events()
+    # Fail-closed: muat cache disk dulu agar restart tak kehilangan kalender.
+    try:
+        cached, fetched = load_cache()
+        if cached:
+            events_cache["events"] = cached
+            events_cache["fetched_at"] = fetched
+            print(f"[NEWS] cache {len(cached)} event (fetch {fetched}).")
+    except Exception as e:
+        print(f"[WARN] load cache kalender: {e}")
+    fresh = fetch_high_impact_usd_events()
+    if fresh:
+        events_cache["events"] = fresh
+        events_cache["fetched_at"] = datetime.now(LOCAL_TZ)
+    elif not events_cache["events"]:
+        print("[WARN] tanpa kalender news (fetch gagal, cache kosong) -> sinyal diblokir.")
     _last_fetch = datetime.now(LOCAL_TZ)
     try:
         main()

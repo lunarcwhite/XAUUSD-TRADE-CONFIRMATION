@@ -11,6 +11,8 @@ import pandas as pd
 
 from config import LOCAL_TZ
 
+from strategies.indicators import atr_value, sl_buffer
+
 RSI_PERIOD = 14
 SL_BUF, MIN_RISK, RR = 1.0, 0.5, 2.0
 TREND_START_HOUR = 14
@@ -58,6 +60,7 @@ def evaluate(h1_df, m15_df, h1_trend=None, now=None):
     if direction not in ("UP", "DOWN"):
         return None, 0, 0, 0, "Pullback tahan: arah H1 tak jelas"
     df = _add_m15(m15_df)
+    buf = sl_buffer(atr_value(df))  # ATR-based: SL di luar noise, min $1.00
     closed, prev = df.iloc[-2], df.iloc[-3]
     if pd.isna(closed["EMA21"]) or pd.isna(closed["EMA50"]) or pd.isna(closed["RSI"]):
         return None, 0, 0, 0, "Indikator M15 belum matang"
@@ -79,7 +82,7 @@ def evaluate(h1_df, m15_df, h1_trend=None, now=None):
             return None, 0, 0, 0, f"BUY batal: RSI {rc:.1f} di luar 40-48"
         if not (c > e21 and c > o):
             return None, 0, 0, 0, "BUY batal: belum rejection > EMA21"
-        sl = min(lo, plo) - SL_BUF
+        sl = min(lo, plo) - buf
         if c - sl < MIN_RISK:
             return None, 0, 0, 0, "BUY batal: SL terlalu rapat"
         return "BUY", c, sl, c + (c - sl) * RR, \
@@ -96,7 +99,7 @@ def evaluate(h1_df, m15_df, h1_trend=None, now=None):
         return None, 0, 0, 0, f"SELL batal: RSI {rc:.1f} di luar 52-60"
     if not (c < e21 and c < o):
         return None, 0, 0, 0, "SELL batal: belum rejection < EMA21"
-    sl = max(hi, phi) + SL_BUF
+    sl = max(hi, phi) + buf
     if sl - c < MIN_RISK:
         return None, 0, 0, 0, "SELL batal: SL terlalu rapat"
     return "SELL", c, sl, c - (sl - c) * RR, \

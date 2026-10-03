@@ -11,6 +11,8 @@ from config import (
     LOCAL_TZ,
 )
 
+from strategies.indicators import atr_value, sl_buffer
+
 RSI_PERIOD = 14
 RSI_OS, RSI_OB = 35, 65
 SL_BUF, MIN_RISK, RR = 1.0, 0.5, 2.0
@@ -54,6 +56,7 @@ def evaluate(m15_df, now=None):
     if not (EXEC_START_HOUR <= exec_hour < EXEC_END_HOUR):
         return None, 0, 0, 0, "Di luar jam sweep 14-23 WIB"
     df = _add_rsi(m15_df)
+    buf = sl_buffer(atr_value(df))  # ATR-based: SL di luar noise, min $1.00
     ah, al = get_asian_range(df, ref_date=closed_time.date())
     if ah is None:
         return None, 0, 0, 0, "Range Asia belum lengkap"
@@ -71,7 +74,7 @@ def evaluate(m15_df, now=None):
             return None, 0, 0, 0, f"SELL batal: RSI tak konfirmasi ({rc:.1f})"
         if c > ema:
             return None, 0, 0, 0, f"SELL batal: harga di atas EMA50 ({ema:.2f})"
-        sl = max(closed["high"], prev["high"]) + SL_BUF
+        sl = max(closed["high"], prev["high"]) + buf
         if sl - c < MIN_RISK:
             return None, 0, 0, 0, "SELL batal: SL terlalu rapat"
         return "SELL", float(c), float(sl), float(c - (sl - c) * RR), \
@@ -84,7 +87,7 @@ def evaluate(m15_df, now=None):
             return None, 0, 0, 0, f"BUY batal: RSI tak konfirmasi ({rc:.1f})"
         if c < ema:
             return None, 0, 0, 0, f"BUY batal: harga di bawah EMA50 ({ema:.2f})"
-        sl = min(closed["low"], prev["low"]) - SL_BUF
+        sl = min(closed["low"], prev["low"]) - buf
         if c - sl < MIN_RISK:
             return None, 0, 0, 0, "BUY batal: SL terlalu rapat"
         return "BUY", float(c), float(sl), float(c + (c - sl) * RR), \

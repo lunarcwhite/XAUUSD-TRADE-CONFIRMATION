@@ -18,9 +18,12 @@ import pandas as pd
 
 from config import LOCAL_TZ
 
+from strategies.indicators import atr_series, atr_value, sl_buffer
+
 RSI_PERIOD = 14
 SL_BUF, MIN_RISK, RR = 1.0, 0.5, 2.0
 DONCHIAN_N = 20
+MAX_RANGE_ATR = 2.5  # tolak breakout bila range bar sinyal > 2.5*ATR (gap/exhaustion)
 TREND_START_HOUR = 14
 TREND_END_HOUR = 2
 
@@ -84,6 +87,8 @@ def evaluate(h1_df, m15_df, h1_trend=None, now=None):
     df = _add(m15_df)
     if "EMA50" not in df.columns:
         df["EMA50"] = df["close"].ewm(span=50, adjust=False).mean()
+    buf = sl_buffer(atr_value(df))  # ATR-based: SL di luar noise, min $1.00
+    atr_v = atr_value(df)
     closed = df.iloc[-2]
     try:
         c, o = float(closed["close"]), float(closed["open"])
@@ -100,13 +105,53 @@ def evaluate(h1_df, m15_df, h1_trend=None, now=None):
     except Exception:
         return None, 0, 0, 0, "Breakout batal: window Donchian kurang"
 
+    def _volume_ok() -> tuple[bool, str]:
+        """Volume bar sinyal >= rata-rata 20 bar (partisipasi). Fail-open bila data kosong."""
+        try:
+            vols = df["tick_volume"].iloc[-22:-2].astype(float)
+            cur = float(df.iloc[-2]["tick_volume"])
+            if vols.sum() <= 0:
+                return True, "vol n/a"
+            avg = float(vols.mean())
+            if avg <= 0:
+                return True, "vol n/a"
+            if cur < avg:
+                return False, f"vol tipis ({cur:.0f}<{avg:.0f})"
+            return True, "vol ok"
+        except Exception:
+            return True, "vol n/a"
+
+    def _extension_ok(side: str) -> tuple[bool, str]:
+        """Tolak break dengan range bar raksasa (>2.5*ATR) = gap/exhaustion.
+
+        (Jarak close-vs-EMA sengaja TIDAK dipakai: di tren sehat yang landai,
+        lag EMA normal membuat close selalu jauh dari EMA.)
+        """
+        import math
+        try:
+            if math.isnan(float(atr_v)):
+                return True, "atr n/a"
+            rng = float(closed["high"]) - float(closed["low"])
+            cap = MAX_RANGE_ATR * float(atr_v)
+            if rng > cap:
+                return False, f"exhaustion range ${rng:.2f}>2.5*ATR"
+            return True, "range ok"
+        except Exception:
+            return True, "range n/a"
+
     if direction == "UP":
         if not (c > dc_high and c > o and c > e21):
             return None, 0, 0, 0, f"Breakout tahan: belum break high20 ({dc_high:.1f})"
         if not (rc >= 55):
             return None, 0, 0, 0, f"Breakout BUY batal: RSI {rc:.1f} < 55"
+        ok_ext, ext_rs = _extension_ok("UP")
+        if not ok_ext:
+            return None, 0, 0, 0, f"Breakout BUY batal: exhaustion ({ext_rs})"
+        ok_vol, vol_rs = _volume_ok()
+        if not ok_vol:
+            return None, 0, 0, 0, f"Breakout BUY batal: {vol_rs}"
         sl = min(float(df.iloc[-2]["low"]), float(df.iloc[-3]["low"]),
-                 float(df.iloc[-4]["low"])) - SL_BUF
+                 float(df.iloc[-4]["low"])) - buf
         if c - sl < MIN_RISK:
             return None, 0, 0, 0, "Breakout BUY batal: SL terlalu rapat"
         return "BUY", c, sl, c + (c - sl) * RR, \
@@ -116,8 +161,14 @@ def evaluate(h1_df, m15_df, h1_trend=None, now=None):
         return None, 0, 0, 0, f"Breakout tahan: belum break low20 ({dc_low:.1f})"
     if not (rc <= 45):
         return None, 0, 0, 0, f"Breakout SELL batal: RSI {rc:.1f} > 45"
+    ok_ext, ext_rs = _extension_ok("DOWN")
+    if not ok_ext:
+        return None, 0, 0, 0, f"Breakout SELL batal: exhaustion ({ext_rs})"
+    ok_vol, vol_rs = _volume_ok()
+    if not ok_vol:
+        return None, 0, 0, 0, f"Breakout SELL batal: {vol_rs}"
     sl = max(float(df.iloc[-2]["high"]), float(df.iloc[-3]["high"]),
-             float(df.iloc[-4]["high"])) + SL_BUF
+             float(df.iloc[-4]["high"])) + buf
     if sl - c < MIN_RISK:
         return None, 0, 0, 0, "Breakout SELL batal: SL terlalu rapat"
     return "SELL", c, sl, c - (sl - c) * RR, \

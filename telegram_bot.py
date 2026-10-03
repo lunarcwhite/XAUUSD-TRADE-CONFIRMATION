@@ -109,6 +109,15 @@ def register_trade(trade_id, trade):
         pending_trades[trade_id] = trade
 
 
+def _record_decision(trade_id, trade, decision, detail=""):
+    """Jurnal approve/ignore/expire ke SQLite (best-effort, tak boleh matikan listener)."""
+    try:
+        from db_logger import log_signal
+        log_signal(trade_id, trade or {}, decision=decision, detail=detail)
+    except Exception as e:
+        print(f"[WARN] jurnal keputusan: {e}")
+
+
 def telegram_button_listener(on_execute, on_command=None, on_text=None):
     """Long-poll getUpdates.
 
@@ -181,6 +190,7 @@ def telegram_button_listener(on_execute, on_command=None, on_text=None):
                                  f"{caption}\n\n⏰ *STATUS: KEDALUWARSA*")
                     with _lock:
                         pending_trades.pop(trade_id, None)
+                    _record_decision(trade_id, trade, "expired", "klik setelah 5 mnt")
                     continue
 
                 if action == "exec":
@@ -190,6 +200,7 @@ def telegram_button_listener(on_execute, on_command=None, on_text=None):
                                      f"{caption}\n\n━━━━\n✅ *STATUS: TEST OK (tidak dieksekusi)*")
                         with _lock:
                             pending_trades.pop(trade_id, None)
+                        _record_decision(trade_id, trade, "approved", "test, tanpa eksekusi")
                         continue
                     answer_callback(cb["id"], "⏳ Eksekusi ke broker...")
                     ok, detail = on_execute(trade)
@@ -199,12 +210,15 @@ def telegram_button_listener(on_execute, on_command=None, on_text=None):
                                  f"{caption}\n\n━━━━\n{status}\n📝 {detail}")
                     with _lock:
                         pending_trades.pop(trade_id, None)
+                    _record_decision(trade_id, trade,
+                                     "approved" if ok else "expired", detail)
                 elif action == "ignore":
                     answer_callback(cb["id"], "Sinyal diabaikan.")
                     edit_caption(chat_id, msg_id,
                                  f"{caption}\n\n🚫 *STATUS: DIABAIKAN*")
                     with _lock:
                         pending_trades.pop(trade_id, None)
+                    _record_decision(trade_id, trade, "ignored", "tap abaikan")
         except Exception:
             time.sleep(2)
 
@@ -224,6 +238,7 @@ def trade_expiry_cleaner():
                 if trade and trade.get("message_id"):
                     edit_caption(trade["chat_id"], trade["message_id"],
                                  f"{trade['caption']}\n\n⏰ *STATUS: KEDALUWARSA*")
+                _record_decision(tid, trade or {}, "expired", "tanpa klik 5 mnt")
                 print(f"[EXPIRED] {tid}")
         except Exception as e:
             print(f"[ERROR] cleaner: {e}")
