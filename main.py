@@ -1,8 +1,16 @@
 """Entry point: multi-user + registrasi mandiri + loop detektor bar M15 (PRD S3)."""
 import os
+import sys
 import threading
 import time
 from datetime import datetime
+
+# Windows: console cp1252 crash pada print emoji -> paksa UTF-8 agar thread tak mati.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 import pandas as pd
 
