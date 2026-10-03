@@ -146,29 +146,6 @@ def session_by_chat(chat_id):
     return None
 
 
-def _pretty_symbol(sym):
-    s = (sym or "XAUUSD").upper().replace("_", "")
-    return "XAU/USD" if s in ("XAUUSD",) else (sym or "XAUUSD")
-
-
-def format_signal_caption(symbol, signal, entry, sl, tp, lot, risk_frac, balance, reason, broker_name):
-    """Format notifikasi sinyal persis gaya [XAU/USD BUY CONFIRMED]."""
-    sl_d = abs(entry - sl)
-    tp_d = abs(tp - entry)
-    rr = (tp_d / sl_d) if sl_d > 0 else 0.0
-    rr_s = f"{rr:.1f}".rstrip("0").rstrip(".")
-    risk_usd = (balance or 0.0) * (risk_frac or 0.0)
-    pretty = _pretty_symbol(symbol)
-    return (
-        f"[{pretty} {signal} CONFIRMED]\n"
-        f"Entry : {entry:.2f}\n"
-        f"SL : {sl:.2f} (${sl_d:.2f})\n"
-        f"TP : {tp:.2f} (${tp_d:.2f} | R:R 1:{rr_s})\n"
-        f"Risk : {risk_frac*100:g}% (${risk_usd:.2f}) -> {lot} Lot\n"
-        f"📌 {reason}\n"
-        f"_{broker_name}_ | Konfirmasi dalam 5 menit")
-
-
 def broadcast_signal(sessions, signal, entry, sl, tp, reason, df):
     """Kirim 1 sinyal ke semua user; lot dihitung per-broker/risk masing-masing."""
     rr = round(abs(tp - entry) / abs(entry - sl), 1) if abs(entry - sl) > 0 else 0.0
@@ -187,17 +164,15 @@ def broadcast_signal(sessions, signal, entry, sl, tp, reason, df):
                 lot = broker.calculate_lot(entry, sl)
             except Exception:
                 lot = 0.01
-            risk_frac = float(user.get("risk_percent", 0.01) or 0.01)
-            try:
-                balance = float(broker.get_balance() or 0.0)
-            except Exception:
-                balance = 0.0
+            risk_pct = float(user.get("risk_percent", 0.01) or 0.01) * 100
             trade_id = f"{user['id']}:tr_{base}_{i}"
-            caption = format_signal_caption(
-                s["symbol"], signal, entry, sl, tp, lot,
-                risk_frac, balance, reason, broker.name)
-            if broker.name == "paper":
-                caption += "\n🧪 *PAPER — uang virtual*"
+            paper_note = "\n🧪 *PAPER — uang virtual, tanpa eksekusi real*" if broker.name == "paper" else ""
+            caption = (
+                f"🎯 *SINYAL {s['symbol']} {signal} [{broker.name}]*{paper_note}\n━━━━\n"
+                f"📌 {reason}\n"
+                f"💵 Entry `{entry:.2f}` | 🛑 SL `{sl:.2f}` | 🎯 TP `{tp:.2f}` (1:{rr})\n"
+                f"⚖️ Lot `{lot}` (risiko {risk_pct:g}%)\n━━━━\n"
+                f"Konfirmasi dalam 5 menit:")
             msg_id = send_photo_to(user["telegram_chat_id"], img, caption, trade_id)
             if msg_id:
                 register_trade(trade_id, {
