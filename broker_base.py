@@ -117,6 +117,10 @@ def create_broker(mode: str | None = None) -> BrokerAdapter:
         from broker_oanda import OandaAdapter
 
         return OandaAdapter()
+    if m == "ctrader":
+        from broker_ctrader import CTraderAdapter
+
+        return CTraderAdapter()
     from broker_mt5 import MT5Adapter
 
     return MT5Adapter()
@@ -138,6 +142,18 @@ def create_broker_for_user(user: dict) -> BrokerAdapter:
             account_id=user.get("oanda_account_id"),
             env=user.get("oanda_env") or "practice",
             instrument=user.get("oanda_instrument") or "XAU_USD",
+        )
+        if risk:
+            b.risk_percent = float(risk)
+        return b
+    if mode == "ctrader":
+        from broker_ctrader import CTraderAdapter
+
+        b = CTraderAdapter(
+            access_token=user.get("ctrader_access_token"),
+            account_id=user.get("ctrader_account_id"),
+            env=user.get("ctrader_env") or "demo",
+            symbol=user.get("ctrader_symbol") or "XAUUSD",
         )
         if risk:
             b.risk_percent = float(risk)

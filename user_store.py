@@ -9,6 +9,8 @@ FIELDS = (
     "chat_id", "user_id", "broker_mode", "risk_percent", "symbol",
     "mt5_login", "mt5_password", "mt5_server", "mt5_path",
     "oanda_api_key", "oanda_account_id", "oanda_env", "oanda_instrument",
+    "ctrader_access_token", "ctrader_account_id", "ctrader_env",
+    "ctrader_symbol",
     "enabled", "created_at",
 )
 
@@ -94,6 +96,10 @@ def to_session_user(row):
         "oanda_account_id": row.get("oanda_account_id") or "",
         "oanda_env": row.get("oanda_env") or "practice",
         "oanda_instrument": row.get("oanda_instrument") or "XAU_USD",
+        "ctrader_access_token": row.get("ctrader_access_token") or "",
+        "ctrader_account_id": row.get("ctrader_account_id") or "",
+        "ctrader_env": row.get("ctrader_env") or "demo",
+        "ctrader_symbol": (row.get("ctrader_symbol") or "XAUUSD").upper(),
         "enabled": True,
         "dynamic": True,
     }

@@ -42,6 +42,7 @@ gold-trade-bot/
 ├── chart_engine.py # Render visualisasi candlestick + indikator via mplfinance
 ├── telegram_bot.py # Foto dispatch, inline keyboard, listener, & expiry cleaner
 ├── order_manager.py # Eksekusi order MT5 & Lifecycle Manager (BE/Partial/Trailing)
+├── broker_ctrader.py # Adapter cTrader Open API (BETA, OAuth2+ProtoBuf, cross-OS)
 ├── db_logger.py # SQLite persistence & Equity Curve generator
 ├── strategies/
 │ ├── **init**.py

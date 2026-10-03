@@ -52,6 +52,18 @@ def validate_config():
         missing.append("TELEGRAM_CHAT_ID")
     if BROKER_MODE == "paper":
         return missing  # paper hanya butuh Telegram
+    if BROKER_MODE == "ctrader":
+        if _is_placeholder(CTRADER_CLIENT_ID):
+            missing.append("CTRADER_CLIENT_ID")
+        if _is_placeholder(CTRADER_CLIENT_SECRET):
+            missing.append("CTRADER_CLIENT_SECRET")
+        if _is_placeholder(CTRADER_ACCESS_TOKEN):
+            missing.append("CTRADER_ACCESS_TOKEN")
+        if _is_placeholder(CTRADER_ACCOUNT_ID):
+            missing.append("CTRADER_ACCOUNT_ID")
+        if CTRADER_ENV not in ("demo", "live"):
+            missing.append("CTRADER_ENV (demo/live)")
+        return missing
     if BROKER_MODE == "oanda":
         if _is_placeholder(OANDA_API_KEY):
             missing.append("OANDA_API_KEY")
@@ -93,6 +105,17 @@ OANDA_ENV = os.getenv("OANDA_ENV", "practice").strip().lower() or "practice"
 OANDA_INSTRUMENT = (os.getenv("OANDA_INSTRUMENT") or os.getenv("OANDA_INSTRUMENT_X") or "XAU_USD").strip() or "XAU_USD"
 # Konversi lot MT5 -> units OANDA untuk XAU: 1.00 lot = 100 oz = 100 units.
 OANDA_UNITS_PER_LOT = 100.0
+
+# ================= KREDENSIAL cTrader Open API =================
+# App dibuat di cTrader ID (clientId/secret milik server, satu untuk semua user).
+# Tiap user cukup menyimpan ACCESS TOKEN + ACCOUNT ID (OAuth2, bisa refresh).
+# Status: adapter penuh tapi BELUM terverifikasi live (butuh token demo).
+CTRADER_CLIENT_ID = os.getenv("CTRADER_CLIENT_ID", "").strip()
+CTRADER_CLIENT_SECRET = os.getenv("CTRADER_CLIENT_SECRET", "").strip()
+CTRADER_ACCESS_TOKEN = os.getenv("CTRADER_ACCESS_TOKEN", "").strip()
+CTRADER_ACCOUNT_ID = os.getenv("CTRADER_ACCOUNT_ID", "").strip()
+CTRADER_ENV = os.getenv("CTRADER_ENV", "demo").strip().lower() or "demo"
+CTRADER_SYMBOL = os.getenv("CTRADER_SYMBOL", "XAUUSD").strip().upper() or "XAUUSD"
 
 # ================= TRADING =================
 # SYMBOL dipakai untuk mode MT5. Mode OANDA pakai OANDA_INSTRUMENT (default XAU_USD).
@@ -172,6 +195,10 @@ def _default_user():
         "oanda_account_id": OANDA_ACCOUNT_ID,
         "oanda_env": OANDA_ENV,
         "oanda_instrument": OANDA_INSTRUMENT,
+        "ctrader_access_token": CTRADER_ACCESS_TOKEN,
+        "ctrader_account_id": CTRADER_ACCOUNT_ID,
+        "ctrader_env": CTRADER_ENV,
+        "ctrader_symbol": CTRADER_SYMBOL,
         "enabled": True,
     }
 
@@ -231,4 +258,6 @@ def user_symbol(user):
         return user["symbol"]
     if (user.get("broker_mode") or "mt5") == "oanda":
         return user.get("oanda_instrument") or OANDA_INSTRUMENT
+    if (user.get("broker_mode") or "mt5") == "ctrader":
+        return (user.get("ctrader_symbol") or CTRADER_SYMBOL or "XAUUSD").upper()
     return SYMBOL  # mt5 + paper tampil sebagai XAUUSD

@@ -16,6 +16,8 @@ alasan objektifnya tertulis satu baris. Tidak ada approve "karena kelihatannya b
 - [ ] Lot + risiko%: masih ≤ toleransiku hari ini?
 - [ ] Chart: harga vs garis Entry/SL/TP + EMA — tidak ada anomali
       (gap aneh, spread melebar, bar tidak wajar)
+- [ ] Spot-check bulanan: hitung manual sesekali — lot ≈ (balance × risiko%)
+      ÷ (|Entry − SL| × 100). Aritmetika bot dipercaya harian, diverifikasi bulanan.
 
 ## 3. Cek khusus bot
 

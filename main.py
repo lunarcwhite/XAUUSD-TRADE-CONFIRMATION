@@ -73,6 +73,11 @@ def _validate_users(users):
                 problems.append(f"{u.get('id')}: OANDA_API_KEY kosong")
             if not (u.get("oanda_account_id") or "").strip() or str(u.get("oanda_account_id")).startswith("isi_"):
                 problems.append(f"{u.get('id')}: OANDA_ACCOUNT_ID kosong")
+        if (u.get("broker_mode") or "mt5") == "ctrader":
+            if not (u.get("ctrader_access_token") or "").strip() or str(u.get("ctrader_access_token")).startswith("isi_"):
+                problems.append(f"{u.get('id')}: CTRADER_ACCESS_TOKEN kosong")
+            if not (u.get("ctrader_account_id") or "").strip() or str(u.get("ctrader_account_id")).startswith("isi_"):
+                problems.append(f"{u.get('id')}: CTRADER_ACCOUNT_ID kosong")
     return problems
 
 
@@ -294,7 +299,8 @@ def start_onboarding(chat_id):
             "Pilih broker (balas angka):\n"
             "1️⃣ OANDA — API key (demo practice / live)\n"
             "2️⃣ Paper — simulasi virtual, tanpa kredensial\n"
-            "3️⃣ MT5 — login akun (terbatas 1 terminal)")
+            "3️⃣ MT5 — login akun (terbatas 1 terminal)\n"
+            "4️⃣ cTrader — access token (demo / live, tanpa terminal)")
 
 
 def handle_text(chat_id, text):
@@ -320,7 +326,11 @@ def handle_text(chat_id, text):
             st.update(step="mt5_login", ts=time.time())
             return ("🖥️ Mode MT5 (catatan: 1 server = 1 terminal login).\n"
                     "Kirim *nomor login MT5* kamu.")
-        return "Balas *1*, *2*, atau *3*."
+        if t == "4":
+            st.update(step="ctrader_token", ts=time.time())
+            return ("🔑 Kirim *access token* cTrader kamu (OAuth2, demo atau live).\n"
+                    "Buat di cTrader ID → API. ⚠️ Setelah ini hapus pesan token ya.")
+        return "Balas *1*, *2*, *3*, atau *4*."
     if step == "oanda_key":
         if len(t) < 10:
             return "Token terlalu pendek, coba lagi."
@@ -366,6 +376,44 @@ def handle_text(chat_id, text):
         return finish_registration(chat_id, {
             "broker_mode": "mt5", "mt5_login": data.get("mt5_login"),
             "mt5_password": data.get("mt5_password"), "mt5_server": t})
+    if step == "ctrader_token":
+        if len(t) < 10:
+            return "Token terlalu pendek, coba lagi."
+        data["ctrader_access_token"] = t
+        accounts = _detect_ctrader(t)
+        if not accounts:
+            return ("❌ Token tidak valid / tak ada akun.\n"
+                    "Kirim ulang token yang benar, atau /start untuk ulang.")
+        data["accounts"] = accounts
+        if len(accounts) == 1:
+            aid, live = accounts[0]
+            return finish_registration(chat_id, {
+                "broker_mode": "ctrader", "ctrader_access_token": t,
+                "ctrader_env": "live" if live else "demo",
+                "ctrader_account_id": str(aid)})
+        st.update(step="ctrader_account", ts=time.time())
+        opts = "\n".join(
+            f"{i+1}. `{a}` ({'live' if lv else 'demo'})"
+            for i, (a, lv) in enumerate(accounts))
+        return (f"Token OK. Pilih akun (balas angka/ID):\n{opts}")
+    if step == "ctrader_account":
+        pick = None
+        accs = data.get("accounts", [])
+        if t.isdigit() and 1 <= int(t) <= len(accs):
+            pick = accs[int(t) - 1]
+        else:
+            for a, lv in accs:
+                if t == str(a):
+                    pick = (a, lv)
+                    break
+        if not pick:
+            return "Pilihan tak dikenal, balas angka/ID dari daftar."
+        aid, live = pick
+        return finish_registration(chat_id, {
+            "broker_mode": "ctrader",
+            "ctrader_access_token": data["ctrader_access_token"],
+            "ctrader_env": "live" if live else "demo",
+            "ctrader_account_id": str(aid)})
     REG.pop(chat_id, None)
     return "Sesi habis, /start untuk ulang."
 
@@ -384,6 +432,15 @@ def _detect_oanda(token):
     return None, []
 
 
+def _detect_ctrader(token):
+    """Akun milik token via GetAccountListByAccessToken. Return [(id, is_live)]."""
+    try:
+        from broker_ctrader import CTraderAdapter
+        return CTraderAdapter(access_token=token, account_id=0).list_accounts()
+    except Exception:
+        return []
+
+
 def finish_registration(chat_id, creds):
     chat_id = str(chat_id)
     row = user_store.save_user(chat_id, user_id=f"tg_{chat_id}", enabled=1, **creds)
@@ -394,6 +451,9 @@ def finish_registration(chat_id, creds):
         extra = ""
         if mode == "oanda":
             extra = f"Akun `{user['oanda_account_id']}` ({user['oanda_env']})."
+        elif mode == "ctrader":
+            extra = (f"Akun `{user['ctrader_account_id']}` "
+                     f"({user['ctrader_env']}). [BETA belum verifikasi live]")
         elif mode == "paper":
             extra = "Uang virtual, tanpa eksekusi real."
         return (f"✅ Terhubung! Mode `{mode}`. {extra}\n"
