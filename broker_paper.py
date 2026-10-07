@@ -186,6 +186,31 @@ class PaperAdapter(BrokerAdapter):
             })
             return True, closed_lot
 
+    def close_position(self, pos: NormalizedPosition):
+        """Tutup penuh: realisasi seluruh sisa volume (untuk auto-flat)."""
+        tick = self.get_tick(pos.symbol)
+        if not tick:
+            return False, 0.0
+        px = tick.bid if pos.side == "BUY" else tick.ask
+        with self._lock:
+            p = self._opens.pop(str(pos.ticket), None)
+            if not p:
+                return False, 0.0
+            lot = float(p["volume_lot"])
+            direction = 1 if p["side"] == "BUY" else -1
+            pnl = round((px - p["price_open"]) * direction * lot * CONTRACT_PER_LOT, 2)
+            self._closed.append({
+                "deal_ticket": abs(hash((str(pos.ticket), lot, time.time()))) % (10 ** 9),
+                "position_ticket": str(pos.ticket),
+                "symbol": p["symbol"],
+                "trade_type": f"{p['side']} (Close)",
+                "volume": lot,
+                "close_time": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                "close_price": px, "profit": pnl, "commission": 0.0,
+                "swap": 0.0, "net_profit": pnl,
+            })
+            return True, lot
+
     def fetch_closed(self, days_back: int = 7) -> list[dict]:
         cutoff = datetime.now(LOCAL_TZ) - timedelta(days=days_back)
         with self._lock:

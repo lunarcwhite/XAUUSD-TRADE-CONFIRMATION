@@ -98,6 +98,9 @@ class BotStateManager:
                         mode=None):
         """(total_trades, net_pnl) hari ini dari SQLite. Fail-open (0, 0.0).
 
+        - total = posisi DISTINCT yang ditutup hari ini (COALESCE
+          position_ticket/deal_ticket) agar partial 50% + close final satu
+          posisi tidak dihitung ganda untuk kuota (review C1).
         - mode='INTRADAY' + kolom mode_used/strategy ada -> hitung hanya
           trade INTRADAY (untuk kuota). Tanpa kolom -> hitung semua.
         - user_id bila kolom user_id ada -> filter per user.
@@ -117,7 +120,11 @@ class BotStateManager:
             except Exception:
                 return 0, 0.0  # tabel belum ada (fresh install)
             cols = _table_columns(conn)
-            q = "SELECT COUNT(*), COALESCE(SUM(net_profit),0) FROM trade_history WHERE close_time LIKE ?"
+            has_pos = "position_ticket" in cols
+            count_expr = ("COUNT(DISTINCT COALESCE(position_ticket, deal_ticket))"
+                          if has_pos else "COUNT(*)")
+            q = (f"SELECT {count_expr}, COALESCE(SUM(net_profit),0) "
+                 "FROM trade_history WHERE close_time LIKE ?")
             params: list = [f"{day_s}%"]
             if user_id is not None and "user_id" in cols:
                 q += " AND user_id=?"
@@ -146,11 +153,13 @@ class BotStateManager:
 
     def validate_daily_intraday_rules(self, balance=None, total_trades=None,
                                       net_pnl=None, now=None, user_id=None,
-                                      db_path=None) -> tuple[bool, str]:
+                                      db_path=None, broker=None) -> tuple[bool, str]:
         """Pemeriksaan wajib sebelum sinyal INTRADAY keluar.
 
         Param opsional (balance/total/net/now) untuk injeksi broker multi-user
         & unit test tanpa MT5. Bila None -> ambil otomatis (MT5 + SQLite).
+        broker: bila diberikan, sinkronkan deal tertutup live dulu (review C1)
+          agar kuota/kill-switch membaca data hari ini, bukan cache 23:55.
         """
         try:
             now = now or datetime.now(LOCAL_TZ)
@@ -187,6 +196,8 @@ class BotStateManager:
 
         # 3. Statistik harian (injeksi atau SQLite; filter INTRADAY bila kolom ada).
         if total_trades is None or net_pnl is None:
+            if broker is not None:
+                self.sync_broker_now(broker, user_id=user_id)
             t, p = self.get_today_stats(user_id=user_id, db_path=db_path,
                                         mode=MODE_INTRADAY)
             total_trades = t if total_trades is None else total_trades
@@ -215,13 +226,30 @@ class BotStateManager:
         return True, "Semua parameter checklist harian terpenuhi"
 
     def should_block_signal(self, user_id=None, db_path=None, now=None,
-                            balance=None) -> tuple[bool, str]:
+                            balance=None, broker=None) -> tuple[bool, str]:
         """Dispatcher: SNIPER selalu lolos rem harian; INTRADAY via validasi."""
         if str(self.current_mode).upper() == MODE_INTRADAY:
             ok, why = self.validate_daily_intraday_rules(
-                balance=balance, now=now, user_id=user_id, db_path=db_path)
+                balance=balance, now=now, user_id=user_id, db_path=db_path,
+                broker=broker)
             return (not ok), why
         return False, "SNIPER: tanpa kuota/kill-switch"
+
+    @staticmethod
+    def sync_broker_now(broker, user_id=None) -> int:
+        """Tarik deal tertutup live ke SQLite (best-effort). Return baris baru.
+
+        Dipanggil sebelum cek kuota/kill agar rem membaca P/L hari ini,
+        bukan hanya hasil sync reporter 23:55 (review C1).
+        """
+        try:
+            from db_logger import sync_via_broker
+            return int(sync_via_broker(
+                broker, days_back=1,
+                user_id=user_id or "default") or 0)
+        except Exception as e:
+            print(f"[WARN] sync live gagal: {e}")
+            return 0
 
     # ---------- Auto-Flat 23:00 WIB (PRD 5.1) ----------
 
@@ -247,8 +275,9 @@ class BotStateManager:
     def close_all_positions(self, broker=None, symbol=None):
         """Tutup seluruh posisi bot. Return (closed, failed, details).
 
-        Broker-agnostic: coba broker.partial_close(ratio=1.0) / close_position
-        bila ada, fallback ke MT5 raw (filter MAGIC_NUMBER).
+        Broker-agnostic: pakai broker.close_position() native (tutup penuh).
+        positions=None (status tak diketahui) -> failed=1 agar thread retry
+        dan TANPA menandai hari (review C3).
         """
         closed, failed, details = 0, 0, []
         # Jalur 1: via adapter broker (paper/OANDA/cTrader/MT5).
@@ -256,19 +285,18 @@ class BotStateManager:
             try:
                 positions = broker.list_positions(symbol) if symbol else broker.list_positions()
             except Exception as e:
-                return 0, 0, [f"list gagal: {e}"]
-            for pos in positions or []:
+                return 0, 1, [f"list gagal: {e}"]
+            if positions is None:
+                return 0, 1, ["daftar posisi tak pasti (broker error) — retry"]
+            for pos in positions:
                 ticket = getattr(pos, "ticket", "?")
                 psym = getattr(pos, "symbol", symbol or "?")
                 try:
-                    if hasattr(broker, "close_position"):
-                        ok = broker.close_position(pos)
-                        ok = bool(ok if isinstance(ok, bool) else ok[0])
-                    else:
-                        ok, _ = broker.partial_close(pos, 1.0)
-                        if not ok:
-                            # Fallback MT5 raw untuk sisa yang tak bisa partial penuh.
-                            ok = self._mt5_close_raw(ticket)
+                    ok, _lot = broker.close_position(pos)
+                    ok = bool(ok)
+                    if not ok:
+                        # Fallback MT5 raw untuk adapter MT5 lama.
+                        ok = self._mt5_close_raw(ticket)
                     if ok:
                         closed += 1
                         details.append(f"#{ticket} {psym} flat OK")
@@ -358,9 +386,14 @@ class BotStateManager:
                             today = datetime.now().date()
                         closed, failed, details = self.close_all_positions(
                             broker=broker, symbol=symbol)
-                        with self._lock:
-                            self._last_flat_by_key[flat_key] = today
-                            self._last_flat_date = today
+                        if failed == 0:
+                            # Tandai hari HANYA bila tak ada gagal (review C3):
+                            # gagal/unknown -> coba lagi 15 dtk berikutnya.
+                            with self._lock:
+                                self._last_flat_by_key[flat_key] = today
+                                self._last_flat_date = today
+                        else:
+                            print(f"[AUTO-FLAT] {failed} gagal, retry 15 dtk.")
                         msg = (f"🕚 *AUTO-FLAT 23:00 [{self.current_mode}]*\n"
                                f"Flat `{closed}` posisi"
                                + (f", gagal `{failed}`" if failed else "")

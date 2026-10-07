@@ -3,6 +3,7 @@ numpy>=1.24
 mplfinance==0.12.10b0
 matplotlib>=3.7
 requests>=2.31
+cryptography>=41  # enkripsi at-rest secret broker (bot_users.db)
 MetaTrader5>=5.0.45; sys_platform == "win32"
 ctrader-open-api>=0.9.3  # cTrader (Twisted async, dipakai sinkron via reactor thread)
 service_identity>=23.1.0  # verifikasi hostname TLS untuk koneksi cTrader live

@@ -40,13 +40,16 @@ def check_price_drift(trade, tick_price=None, broker=None, mode=None):
     """Price Drift Guard (PRD 5.4): tolak eksekusi bila tick bergeser > batas mode.
 
     tick_price None + broker ada -> ambil tick live (ask BUY / bid SELL).
-    Return (ok: bool, detail: str). Gagal ambil tick -> fail-open True
-    agar tak blokir eksekusi saat feed glitch (alasan dicatat).
+    Fail-CLOSED (review W1): tick tak tersedia/tak valid -> TOLAK, karena
+    eksekusi buta harga persis mode kegagalan yang dijaga guard ini.
+    Return (ok: bool, detail: str).
     """
     try:
         entry = float(trade.get("entry", 0) or 0)
     except Exception:
-        return True, "drift skip: entry invalid"
+        return False, "❌ Order Dibatalkan: harga entry sinyal invalid!"
+    if not entry:
+        return False, "❌ Order Dibatalkan: harga entry sinyal invalid!"
     if mode is None:
         mode = trade.get("mode") or trade.get("mode_used")
     if mode is None:
@@ -64,17 +67,19 @@ def check_price_drift(trade, tick_price=None, broker=None, mode=None):
         try:
             tick = broker.get_tick(trade.get("symbol"))
             if tick is None:
-                return True, "drift skip: tick tak tersedia"
+                return False, ("❌ Order Dibatalkan: harga live tak tersedia "
+                               "(drift guard fail-closed)!")
             is_buy = str(trade.get("action", "")).upper() == "BUY"
             px = float(tick.ask if is_buy else tick.bid)
         except Exception as e:
-            return True, f"drift skip: tick error ({e})"
+            return False, f"❌ Order Dibatalkan: tick error ({e})!"
     if px is None:
-        return True, "drift skip: tanpa harga pembanding"
+        return False, ("❌ Order Dibatalkan: tanpa harga pembanding "
+                       "(drift guard fail-closed)!")
     try:
         drift = abs(float(px) - entry)
     except Exception:
-        return True, "drift skip: harga invalid"
+        return False, "❌ Order Dibatalkan: harga pembanding invalid!"
     if drift > limit:
         return (False,
                 f"❌ Order Dibatalkan: Harga telah bergeser > ${limit:.2f} dari kalkulasi awal!")
@@ -236,6 +241,11 @@ def generic_position_lifecycle_manager(broker, send_text, symbol=None, stop_even
     while stop_event is None or not stop_event.is_set():
         try:
             positions = broker.list_positions(symbol) if symbol else broker.list_positions()
+            if positions is None:
+                # Status tak diketahui (broker error) -> lewati iterasi TANPA
+                # mengubah state _done (jangan picu partial ganda pasca-outage).
+                time.sleep(2)
+                continue
             live = {str(p.ticket) for p in positions}
             _done_generic.intersection_update(live)
             for pos in positions:

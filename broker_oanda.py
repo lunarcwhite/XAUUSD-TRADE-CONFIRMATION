@@ -220,7 +220,7 @@ class OandaAdapter(BrokerAdapter):
             return out
         except Exception as e:
             print(f"[ERROR] OANDA openTrades: {e}")
-            return []
+            return None  # tak diketahui -> pemanggil wajib fail-closed (review W5)
 
     def modify_sltp(self, ticket, symbol: str | None, new_sl: float, new_tp: float) -> bool:
         try:
@@ -269,6 +269,26 @@ class OandaAdapter(BrokerAdapter):
             return False, 0.0
         except Exception as e:
             print(f"[ERROR] OANDA partial: {e}")
+            return False, 0.0
+
+    def close_position(self, pos: NormalizedPosition):
+        """Tutup penuh: PUT .../close tanpa units = seluruh sisa (untuk auto-flat)."""
+        try:
+            rc = self._s.put(
+                f"{self.base}/accounts/{self.account_id}/trades/{pos.ticket}/close",
+                timeout=10)
+            if rc.status_code in (200, 201):
+                try:
+                    fill = rc.json().get("orderFillTransaction", {}) or {}
+                    closed_u = abs(float(fill.get("units", 0) or 0))
+                    lot = round(closed_u / OANDA_UNITS_PER_LOT, 2) if closed_u else float(pos.volume_lot)
+                except Exception:
+                    lot = float(pos.volume_lot)
+                return True, lot
+            print(f"[SKIP CLOSE] OANDA #{pos.ticket}: {rc.status_code} {rc.text[:150]}")
+            return False, 0.0
+        except Exception as e:
+            print(f"[ERROR] OANDA close: {e}")
             return False, 0.0
 
     def fetch_closed(self, days_back: int = 7) -> list[dict]:

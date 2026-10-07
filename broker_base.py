@@ -93,6 +93,18 @@ class BrokerAdapter(ABC):
         """Return (ok: bool, closed_lot: float)."""
         raise NotImplementedError
 
+    def close_position(self, pos: NormalizedPosition):
+        """Tutup penuh 1 posisi. Return (ok: bool, closed_lot: float).
+
+        Default via partial_close(1.0); adapter yang menolak tutup-penuh
+        (paper/cTrader/OANDA) WAJIB override dengan close native.
+        Dipakai auto-flat 23:00 (PRD V3.0 S5.1) — review C3.
+        """
+        try:
+            return self.partial_close(pos, 1.0)
+        except Exception as e:
+            return False, 0.0
+
     @abstractmethod
     def fetch_closed(self, days_back: int = 7) -> list[dict]:
         """Return list dict siap INSERT ke trade_history.

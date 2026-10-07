@@ -385,13 +385,18 @@ class CTraderAdapter(BrokerAdapter):
     def _raw_price(self, price: float) -> int:
         return int(round(float(price) * self._scale()))
 
-    def _positions(self) -> list:
+    def _positions(self) -> list | None:
+        """Posisi live aktif. None = transport/API error (bedakan dari kosong).
+
+        Fail-closed (review W5): pemanggil wajib perlakukan None sebagai
+        "tak diketahui", bukan "tak ada posisi".
+        """
         _, _, _, Msg, _ = _ct()
         req = Msg.ProtoOAReconcileReq()
         req.ctidTraderAccountId = self.account_id
         res, err = self._send(req)
         if res is None:
-            return []
+            return None
         return [p for p in (res.position or [])
                 if int(getattr(p, "positionStatus", 0)) == 1]
 
@@ -418,7 +423,11 @@ class CTraderAdapter(BrokerAdapter):
         # Fill via polling label (ExecutionEvent tidak diandalkan).
         deadline = time.time() + 12
         while time.time() < deadline:
-            for p in self._positions():
+            poss = self._positions()
+            if poss is None:
+                time.sleep(1)
+                continue  # status tak diketahui -> polling lagi, bukan gagal
+            for p in poss:
                 try:
                     if str(p.tradeData.label) == label:
                         px = float(p.price) / self._scale()
@@ -433,12 +442,20 @@ class CTraderAdapter(BrokerAdapter):
             time.sleep(1)
         return False, "Timeout konfirmasi fill (cek manual posisi!)"
 
-    def list_positions(self, symbol=None) -> list[NormalizedPosition]:
+    def list_positions(self, symbol=None) -> list[NormalizedPosition] | None:
+        """Posisi simbol adapter ini. None = status tak diketahui (fail-closed).
+
+        Filter simbol SELALU diterapkan (review C4): tanpa filter, posisi
+        simbol lain ikut terdaftar berlabel XAUUSD dan berisiko ikut di-flat.
+        """
         out = []
-        for p in self._positions():
+        poss = self._positions()
+        if poss is None:
+            return None
+        for p in poss:
             try:
                 td = p.tradeData
-                if int(td.symbolId) != self._symbol_id and symbol:
+                if int(td.symbolId) != self._symbol_id:
                     continue
                 side = "BUY" if int(td.tradeSide) == 1 else "SELL"
                 scale = self._scale()
@@ -466,7 +483,11 @@ class CTraderAdapter(BrokerAdapter):
         _, _, _, Msg, _ = _ct()
         try:
             live = None
-            for p in self._positions():
+            poss = self._positions()
+            if poss is None:
+                print(f"[SKIP PARTIAL] cTrader #{pos.ticket}: status posisi tak diketahui")
+                return False, 0.0
+            for p in poss:
                 if str(p.positionId) == str(pos.ticket):
                     live = p
                     break
@@ -489,6 +510,38 @@ class CTraderAdapter(BrokerAdapter):
             return True, round(close_units / VOL_PER_LOT, 2)
         except Exception as e:
             print(f"[ERROR] cTrader partial: {e}")
+            return False, 0.0
+
+    def close_position(self, pos: NormalizedPosition):
+        """Tutup penuh: ProtoOAClosePositionReq TANPA volume = seluruh posisi.
+
+        Dipakai auto-flat 23:00 (review C3) — partial_close(1.0) selalu
+        ditolak guard sisa-minimum, jadi butuh close native.
+        """
+        _, _, _, Msg, _ = _ct()
+        try:
+            poss = self._positions()
+            if poss is None:
+                print(f"[SKIP CLOSE] cTrader #{pos.ticket}: status posisi tak diketahui")
+                return False, 0.0
+            live = None
+            for p in poss:
+                if str(p.positionId) == str(pos.ticket):
+                    live = p
+                    break
+            if live is None:
+                return False, 0.0
+            lot = self._to_lot(int(live.tradeData.volume))
+            req = Msg.ProtoOAClosePositionReq()
+            req.ctidTraderAccountId = self.account_id
+            req.positionId = int(live.positionId)
+            res, err = self._send(req)
+            if res is None:
+                print(f"[SKIP CLOSE] cTrader #{pos.ticket}: {err}")
+                return False, 0.0
+            return True, lot
+        except Exception as e:
+            print(f"[ERROR] cTrader close: {e}")
             return False, 0.0
 
     def fetch_closed(self, days_back: int = 7) -> list[dict]:

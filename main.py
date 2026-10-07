@@ -530,8 +530,11 @@ def main():
         if sess is None or sess["stop"].is_set():
             return False, "User/broker tidak aktif"
         # Governor race-guard: tombol diklik saat posisi sudah terbuka.
+        # None = status tak diketahui -> fail-closed, tolak (bukan lolos).
         try:
             poss = sess["broker"].list_positions(sess.get("symbol"))
+            if poss is None:
+                return False, "Ditolak: status posisi tak diketahui (broker error)"
             if poss and len(poss) >= int(MAX_OPEN_POSITIONS or 1):
                 return False, f"Ditolak governor: sudah ada #{poss[0].ticket}"
         except Exception:
@@ -778,12 +781,13 @@ def main():
                     uid = s["user"]["id"]
                     if mode == MODE_INTRADAY:
                         # Rem harian PRD 5.1 (kuota 3, kill 2%, cutoff 22:30).
+                        # broker diteruskan agar deal live di-sync dulu (review C1).
                         try:
                             bal = float(s["broker"].get_balance() or 0.0)
                         except Exception:
                             bal = 0.0
                         blocked_m, why_m = bot_state.should_block_signal(
-                            user_id=uid, now=now, balance=bal)
+                            user_id=uid, now=now, balance=bal, broker=s["broker"])
                         if blocked_m:
                             skipped.append((s, f"MODE {uid}: {why_m}"))
                             continue

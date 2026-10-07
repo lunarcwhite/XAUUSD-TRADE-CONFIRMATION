@@ -128,13 +128,16 @@ class MT5Adapter(BrokerAdapter):
             return False, f"Broker menolak ({result.retcode}: {result.comment})"
         return True, f"Ticket #{result.order} @ {result.price:.2f}"
 
-    def list_positions(self, symbol: str | None = None) -> list[NormalizedPosition]:
+    def list_positions(self, symbol: str | None = None) -> list[NormalizedPosition] | None:
         mt5 = _mt5()
         out: list[NormalizedPosition] = []
         try:
-            positions = mt5.positions_get() or []
+            positions = mt5.positions_get()
+            if positions is None:
+                return None  # tak diketahui -> pemanggil wajib fail-closed
+            positions = positions or []
         except Exception:
-            return []
+            return None
         for p in positions:
             if p.magic != MAGIC_NUMBER:
                 continue
@@ -187,6 +190,37 @@ class MT5Adapter(BrokerAdapter):
         })
         if r and r.retcode == mt5.TRADE_RETCODE_DONE:
             return True, close_vol
+        return False, 0.0
+
+    def close_position(self, pos: NormalizedPosition):
+        """Tutup penuh via order berlawanan seluruh volume (untuk auto-flat)."""
+        mt5 = _mt5()
+        live = None
+        try:
+            for p in (mt5.positions_get() or []):
+                if str(p.ticket) == str(pos.ticket):
+                    live = p
+                    break
+        except Exception:
+            return False, 0.0
+        if live is None:
+            return False, 0.0
+        tick = mt5.symbol_info_tick(live.symbol)
+        if not tick:
+            return False, 0.0
+        is_buy = live.type == mt5.POSITION_TYPE_BUY
+        r = mt5.order_send({
+            "action": mt5.TRADE_ACTION_DEAL, "position": live.ticket,
+            "symbol": live.symbol, "volume": live.volume,
+            "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+            "price": tick.bid if is_buy else tick.ask,
+            "deviation": DEVIATION, "magic": MAGIC_NUMBER,
+            "comment": "Auto-Flat 23:00",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": self._filling_mode(live.symbol),
+        })
+        if r and r.retcode == mt5.TRADE_RETCODE_DONE:
+            return True, float(live.volume)
         return False, 0.0
 
     def fetch_closed(self, days_back: int = 7) -> list[dict]:
