@@ -51,6 +51,7 @@ from telegram_bot import (
     send_photo_to,
     send_text_to,
     set_authorized_chats,
+    set_bot_commands,
     trade_expiry_cleaner,
     telegram_button_listener,
 )
@@ -573,6 +574,12 @@ def main():
         user, broker, sym = s["user"], s["broker"], s["symbol"]
         if cmd == "/mode":
             if not arg:
+                try:
+                    from telegram_bot import send_mode_picker
+                    if send_mode_picker(chat_id):
+                        return None
+                except Exception:
+                    pass
                 return (f"🔀 Mode aktif: `{bot_state.current_mode}`\n"
                         f"Gunakan: `/mode <sniper|intraday>`")
             changed, reply = bot_state.parse_mode_command(f"/mode {arg}")
@@ -673,6 +680,10 @@ def main():
     threading.Thread(target=telegram_button_listener,
                      args=(on_execute, on_command, on_text), daemon=True).start()
     threading.Thread(target=trade_expiry_cleaner, daemon=True).start()
+    try:
+        set_bot_commands()  # menu persisten; gagal = bot tetap jalan
+    except Exception as e:
+        print(f"[WARN] menu perintah: {e}")
     print(f"🔥 Bot aktif ({len(live_sessions())} user): listener + expiry + lifecycle + reporter.")
     if not hasattr(main, "_last_fetch"):
         main._last_fetch = datetime.now(LOCAL_TZ)

@@ -104,6 +104,70 @@ def edit_caption(chat_id, message_id, new_caption):
         print(f"[ERROR] edit_caption: {e}")
 
 
+def edit_text(chat_id, message_id, new_text):
+    """Ganti teks pesan + hapus tombol (untuk picker/mode)."""
+    try:
+        requests.post(
+            f"{_API}/editMessageText",
+            json={"chat_id": chat_id, "message_id": message_id,
+                  "text": new_text, "parse_mode": "Markdown",
+                  "reply_markup": json.dumps({"inline_keyboard": []})},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[ERROR] edit_text: {e}")
+
+
+BOT_COMMANDS = [
+    {"command": "mode", "description": "Ganti mode strategi (sniper|intraday)"},
+    {"command": "status", "description": "Saldo, posisi, kuota hari ini"},
+    {"command": "test", "description": "Contoh sinyal + tombol (tanpa eksekusi)"},
+    {"command": "help", "description": "Bantuan & daftar perintah"},
+    {"command": "unlink", "description": "Putus akun dari chat ini"},
+    {"command": "start", "description": "Mulai / daftar akun"},
+]
+
+
+def set_bot_commands():
+    """Daftarkan menu perintah persisten (tombol Menu di kolom chat). Best-effort."""
+    try:
+        r = requests.post(f"{_API}/setMyCommands",
+                          json={"commands": BOT_COMMANDS}, timeout=10)
+        if r.status_code == 200:
+            print("[TELEGRAM] menu perintah terdaftar.")
+            return True
+        print(f"[WARN] setMyCommands: {r.status_code} {r.text[:120]}")
+    except Exception as e:
+        print(f"[WARN] setMyCommands: {e}")
+    return False
+
+
+def send_mode_picker(chat_id):
+    """Pesan pemilih mode dengan tombol inline Sniper/Intraday. Return True bila terkirim."""
+    keyboard = {"inline_keyboard": [
+        [{"text": "🎯 Sniper (M15)", "callback_data": "mode:SNIPER"}],
+        [{"text": "⚡ Intraday (M5)", "callback_data": "mode:INTRADAY"}],
+    ]}
+    try:
+        try:
+            from state_manager import bot_state as _bs
+            cur = _bs.current_mode
+        except Exception:
+            cur = "?"
+        r = requests.post(
+            f"{_API}/sendMessage",
+            json={"chat_id": chat_id,
+                  "text": f"🔀 *Mode aktif: `{cur}`*\nPilih mode strategi:",
+                  "parse_mode": "Markdown",
+                  "reply_markup": json.dumps(keyboard)},
+            timeout=10,
+        )
+        return r.status_code == 200
+    except Exception as e:
+        print(f"[ERROR] mode picker: {e}")
+        return False
+
+
 def register_trade(trade_id, trade):
     with _lock:
         pending_trades[trade_id] = trade
@@ -180,6 +244,26 @@ def telegram_button_listener(on_execute, on_command=None, on_text=None):
                 chat_id = cb["message"]["chat"]["id"]
                 if _AUTHORIZED_CHATS and str(chat_id) not in _AUTHORIZED_CHATS:
                     answer_callback(cb["id"], "Unauthorized.")
+                    continue
+                # Picker mode (bukan sinyal): "mode:SNIPER|INTRADAY".
+                if action == "mode":
+                    val = (trade_id or "").strip().upper()
+                    try:
+                        reply = on_command(str(chat_id), f"/mode {val}") \
+                            if on_command else None
+                    except Exception as e:
+                        reply = f"Gagal ganti mode: {e}"
+                    answer_callback(cb["id"], reply or "")
+                    try:
+                        msg = cb["message"]
+                        if "caption" in msg:
+                            edit_caption(chat_id, msg["message_id"],
+                                         f"{msg.get('caption', '')}\n\n🔀 {reply}")
+                        else:
+                            edit_text(chat_id, msg["message_id"],
+                                      f"🔀 *Mode strategi*\n{reply}")
+                    except Exception:
+                        pass
                     continue
                 msg_id = cb["message"]["message_id"]
                 caption = cb["message"].get("caption", "")
