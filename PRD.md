@@ -1,28 +1,20 @@
-# PRODUCT REQUIREMENTS DOCUMENT (PRD) - V2.0
-
-## Project: XAU/USD Adaptive Dual-Strategy Trading Assistant System
+# PRODUCT REQUIREMENTS DOCUMENT (PRD) - V3.0
+## Project: XAU/USD Adaptive Dual-Mode Trading Assistant System
 
 ---
 
 ### 1. RINGKASAN PROYEK & TUJUAN
-
-Membangun bot asisten trading semi-otomatis adaptif untuk instrumen XAU/USD berbasis MetaTrader 5 Python API dan Telegram Bot. Sistem ini memiliki kemampuan **Market Regime Detection** yang secara otomatis memilih strategi yang tepat:
-
-1. Mendeteksi rezim pasar pada timeframe H1 (Trending vs. Ranging).
-2. Mengeksekusi strategi **Session Liquidity Sweep** saat pasar konsolidasi/ranging.
-3. Mengeksekusi strategi **HTF Trend Pullback** saat pasar bergerak dalam tren kuat.
-4. Memvalidasi setup dengan filter _News Guard_ (Forex Factory) dan momentum RSI 14.
-5. Mengirimkan visualisasi grafik (_chart snapshot_) dengan penanda rezim dan tombol persetujuan interaktif ke Telegram.
-6. Mengeksekusi order instan jika dikonfirmasi pengguna dalam 5 menit.
-7. Mengelola posisi aktif (Partial Take Profit 50% di 1:1, Auto Break-Even, dan Dynamic Trailing Stop).
-8. Mencatat transaksi ke SQLite dan mengirim kurva ekuitas harian pada 23:55 WIB.
+Membangun bot asisten trading semi-otomatis untuk instrumen XAU/USD berbasis MetaTrader 5 Python API dan Telegram Bot dengan arsitektur **Dual-Mode Operasional**:
+1. **Mode 1: Sniper / Precision Mode (Timeframe M15)**  
+   Setup selektif berbasis *Session Liquidity Sweep* dan *HTF Trend Pullback*. Menahan posisi secara objektif mengikuti struktur swing tanpa batasan kuota kaku (timeout konfirmasi 300 detik).
+2. **Mode 2: Intraday Disciplined Mode (Timeframe M5)**  
+   Eksekusi cepat berbasis *Session VWAP* dan *Dynamic ATR Buffer*. Dirancang dengan rem psikologis harian: kuota maksimal 3 trade/hari, *Daily Kill Switch* 2%, proteksi latensi *Price Drift Guard* ($0.80), batas kedaluwarsa tombol ketat (90 detik), serta penutupan posisi otomatis sebelum tengah malam (*Overnight Auto-Flat* 23:00 WIB).
 
 ---
 
 ### 2. TECH STACK & DEPENDENCIES
-
-- **Runtime & OS:** Python 3.10+ di Windows (Native MT5 Library support).
-- **Broker API:** `MetaTrader5` library resmi.
+- **Runtime & OS:** Python 3.10+ di Windows (Native MetaTrader 5 support).
+- **Broker API:** Library resmi `MetaTrader5`.
 - **Data & Analisis:** `pandas`, `numpy`.
 - **Visualisasi:** `mplfinance`, `matplotlib`.
 - **Jaringan & HTTP:** `requests`.
@@ -32,110 +24,117 @@ Membangun bot asisten trading semi-otomatis adaptif untuk instrumen XAU/USD berb
 ---
 
 ### 3. STRUKTUR PROYEK MODULAR
-
-AI Agent wajib membagi arsitektur strategi menjadi router terpisah:
+AI Agent wajib memisahkan kode ke dalam modul terisolasi berikut:
 
 gold-trade-bot/
-├── PRD.md # Dokumen spesifikasi utama (Ground Truth)
-├── config.py # Konfigurasi kredensial, parameter trading, dan path
-├── news_guard.py # Kalender ekonomi Forex Factory & verifikasi blackout
-├── chart_engine.py # Render visualisasi candlestick + indikator via mplfinance
-├── telegram_bot.py # Foto dispatch, inline keyboard, listener, & expiry cleaner
-├── order_manager.py # Eksekusi order MT5 & Lifecycle Manager (BE/Partial/Trailing)
-├── broker_ctrader.py # Adapter cTrader Open API (BETA, OAuth2+ProtoBuf, cross-OS)
-├── db_logger.py # SQLite persistence & Equity Curve generator
+├── PRD.md                       # Dokumen spesifikasi utama (Ground Truth)
+├── config.py                    # Konstanta, parameter kedua mode, dan kredensial
+├── state_manager.py             # Pengelola mode (SNIPER/INTRADAY) & rem darurat harian
+├── news_guard.py                # Scraper Forex Factory & verifikasi blackout USD
+├── chart_engine.py              # Visualisasi candlestick, VWAP, EMA, RSI via mplfinance
+├── telegram_bot.py              # Dispatcher foto, inline keyboard, listener, & expiry cleaner
+├── order_manager.py             # Eksekusi MT5, Drift Guard, Lifecycle (BE/Partial/Trailing)
+├── db_logger.py                 # SQLite persistence & Equity Curve generator
 ├── strategies/
-│ ├── **init**.py
-│ ├── regime_classifier.py # Deteksi tren H1 (ADX & EMA 50/200)
-│ ├── session_sweep.py # Logika strategi Session Liquidity Sweep
-│ └── trend_pullback.py # Logika strategi HTF Trend Pullback
-├── strategy_router.py # Dispatcher: Memilih strategi berdasarkan regime
-└── main.py # Loop utama (M15 New Bar Detector)
+│   ├── __init__.py
+│   ├── regime_classifier.py     # Deteksi tren H1 (ADX 14 & EMA 50/200)
+│   ├── session_sweep.py         # Strategi M15 Session Sweep (Mode Sniper)
+│   ├── trend_pullback.py        # Strategi M15 Trend Pullback (Mode Sniper)
+│   └── intraday_vwap_m5.py      # Strategi M5 VWAP + ATR Rejection (Mode Intraday)
+├── strategy_router.py           # Dispatcher strategi berdasarkan mode aktif & rezim
+└── main.py                      # Multi-timeframe listener loop (M15 & M5 Bar Close)
 
 ---
 
-### 4. SPESIFIKASI BISNIS & LOGIKA SISTEM
+### 4. SPESIFIKASI DUAL-MODE & PARAMETER OPERASIONAL
 
-#### 4.1. Modul News Guard (`news_guard.py`)
+| Parameter | Mode 1: SNIPER (M15) | Mode 2: INTRADAY (M5) |
+| :--- | :--- | :--- |
+| **Timeframe Eksekusi** | M15 (Closed Bar `[-2]`) | M5 (Closed Bar `[-2]`) |
+| **Konteks Timeframe Tinggi** | H1 (Regime ADX & EMA) | H1 (Tren Utama) + M15 (Area Nilai) |
+| **Indikator Kunci** | EMA 50, RSI 14 | Session VWAP (Reset 06:00 WIB), ATR 14 M5 |
+| **Metode Penentuan SL** | Swing Low/High M15 ± $1.00 Buffer | Swing Low/High M5 ± (1.2 × ATR M5) |
+| **Batas Waktu Tombol (Timeout)**| 300 Detik (5 Menit) | **90 Detik (1.5 Menit)** |
+| **Max Price Drift Guard** | $1.50 | **$0.80 (Toleransi pergeseran harga)** |
+| **Batas Kuota Transaksi** | Tanpa batasan kuota harian | **Maksimal 3 Trade / Hari** |
+| **Daily Kill Switch** | Nonaktif | **Aktif (Kunci sistem jika rugi harian $\ge$ 2%)** |
+| **Batas Waktu Buka Posisi** | 14:00 – 23:00 WIB | 14:30 – 17:00 & 19:30 – 22:30 WIB |
+| **Aturan Menginap (Overnight)** | Diizinkan berjalan normal | **Auto-Flat pukul 23:00 WIB (Wajib tutup)** |
 
-- Sumber: Forex Factory JSON feed mingguan.
+---
+
+### 5. DETAIL SPESIFIKASI MODUL
+
+#### 5.1. Modul State Manager (`state_manager.py`)
+- Menyimpan status mode aktif: `SNIPER` (default) atau `INTRADAY`.
+- Menyediakan endpoint penggantian mode via Telegram command `/mode <sniper|intraday>`.
+- **Validasi Khusus Mode INTRADAY:**
+  1. Hitung total trade hari ini dari SQLite: Tolak sinyal jika `total_trades >= 3`.
+  2. Hitung net profit/loss hari ini: Kunci sistem (*Kill Switch*) jika `net_pnl <= -(balance * 0.02)`.
+  3. Tolak entri jika jam lokal $\ge$ 22:30 WIB.
+- **Thread Auto-Flat (23:00 WIB):**
+  - Jika mode adalah `INTRADAY`, tutup seluruh tiket posisi aktif ber-magic number bot di harga pasar dan kirim notifikasi penutupan ke Telegram.
+
+#### 5.2. Modul News Guard (`news_guard.py`)
+- Sumber data: Forex Factory JSON feed mingguan.
 - Filter: Currency `USD` dengan `impact == "High"`.
-- Jendela Blackout: ±30 menit dari jam rilis berita.
-- Jika waktu saat ini berada dalam jendela blackout, sistem langsung membatalkan evaluasi strategi (_short-circuit_).
+- Jendela Blackout: ±30 menit dari rilis berita.
+- Berlaku mutlak untuk kedua mode: jika blackout aktif, seluruh pembuatan sinyal dibatalkan (*short-circuit*).
 
-#### 4.2. Market Regime Classifier (`strategies/regime_classifier.py`)
+#### 5.3. Logika Strategi Mode Intraday M5 (`strategies/intraday_vwap_m5.py`)
+- **Session VWAP (Pure Pandas):**
+  - Reset setiap pergantian hari pukul 06:00 WIB.
+  - Formula: $\text{VWAP} = \frac{\sum (\text{Typical Price} \times \text{Volume})}{\sum \text{Volume}}$, di mana $\text{Typical Price} = \frac{\text{High} + \text{Low} + \text{Close}}{3}$.
+- **ATR 14 (Timeframe M5):**
+  - Dihitung menggunakan Wilder's smoothing untuk menentukan dinamika buffer SL.
+- **Setup BUY M5 Valid:**
+  1. Konteks H1: Tren tidak sedang dalam *Strong Downtrend*.
+  2. Filter Nilai: Lilin penutupan M5 berada di atas VWAP (`Close[-2] > VWAP[-2]`).
+  3. Pemicu: Jarum lilin (`Low[-2]` atau `Low[-3]`) sempat menguji (*retest*) area VWAP / Support M15, lalu lilin `[-2]` ditutup bullish (`Close[-2] > Open[-2]`).
+  4. Stop Loss: $\text{Swing Low M5} - (1{,}2 \times \text{ATR}_{M5})$.
+  5. Take Profit: Minimal rasio 1:2 R:R.
+- **Setup SELL M5 Valid:**
+  1. Konteks H1: Tren tidak sedang dalam *Strong Uptrend*.
+  2. Filter Nilai: Lilin penutupan M5 berada di bawah VWAP (`Close[-2] < VWAP[-2]`).
+  3. Pemicu: Jarum lilin (`High[-2]` atau `High[-3]`) sempat menguji area VWAP / Resistance M15, lalu lilin `[-2]` ditutup bearish (`Close[-2] < Open[-2]`).
+  4. Stop Loss: $\text{Swing High M5} + (1{,}2 \times \text{ATR}_{M5})$.
+  5. Take Profit: Minimal rasio 1:2 R:R.
 
-Klasifikasi pasar dihitung pada timeframe **H1** setiap candle M15 selesai:
+#### 5.4. Modul Telegram, Latensi & Drift Guard (`telegram_bot.py` & `order_manager.py`)
+- **Pesan Notifikasi:**
+  - Header wajib menampilkan mode: `[MODE: INTRADAY M5]` atau `[MODE: SNIPER M15]`.
+  - Sertakan detail harga: Entry, SL, TP, Rekomendasi Lot (1% modal), Nilai VWAP, dan Nilai ATR.
+- **Tombol Persetujuan:** `[🟢 Buka Posisi]` dan `[🔴 Abaikan]`.
+- **Dynamic Expiry Cleaner:**
+  - Jika sinyal berasal dari Mode INTRADAY $\rightarrow$ Tombol kedaluwarsa dalam **90 detik**.
+  - Jika sinyal berasal dari Mode SNIPER $\rightarrow$ Tombol kedaluwarsa dalam **300 detik**.
+- **Price Drift Guard (Proteksi Eksekusi Riil):**
+  - Saat tombol `[🟢 Buka Posisi]` ditekan, bot membaca harga tick terkini (`tick.ask` untuk BUY, `tick.bid` untuk SELL).
+  - Untuk Mode INTRADAY: Jika $\vert{}\text{Harga Tick} - \text{Harga Entry Sinyal}\vert{} > \$0{,}80$, **batalkan eksekusi order** dan kirim notifikasi:  
+    `"❌ Order Dibatalkan: Harga telah bergeser > $0.80 dari kalkulasi awal!"`
 
-- **Kalkulasi Indikator H1 (Pure Pandas):**
-  - EMA 50 & EMA 200.
-  - ADX 14 (Average Directional Index): Menggunakan smoothed TR, +DM, dan -DM.
-- **Logika Klasifikasi:**
-  - **Rezim TRENDING:** Terpenuhi jika `ADX >= 25` DAN susunan EMA rapi:
-    - _Uptrend:_ `Close H1 > EMA 50 > EMA 200`.
-    - _Downtrend:_ `Close H1 < EMA 50 < EMA 200`.
-  - **Rezim RANGING:** Terpenuhi jika `ADX < 25` ATAU susunan EMA saling bersilangan (_entangled/flat_).
+#### 5.5. Manajemen Posisi Aktif (`order_manager.py`)
+- Berjalan di background thread setiap 2 detik untuk seluruh posisi aktif:
+  1. **Target 1:1 R:R Tercapai:**
+     - Eksekusi penutupan parsial 50% volume (*Partial TP*).
+     - Geser Stop Loss ke $\text{Entry} + \$0{,}20$ (BUY) atau $\text{Entry} - \$0{,}20$ (SELL) untuk mengunci *Break-Even*.
+  2. **Dynamic Trailing Stop:**
+     - Aktif setelah posisi berada di Break-Even.
+     - Jarak trailing: $2.00 di belakang harga pasar (Mode Sniper) atau $1.50 (Mode Intraday).
+     - Step modifikasi minimal: $0.50 (anti-spam server broker).
 
-#### 4.3. Detail Dua Strategi
-
-##### Strategi A: Session Liquidity Sweep (`strategies/session_sweep.py`)
-
-- **Aktif Saat:** Rezim terdeteksi `RANGING`.
-- **Waktu Eksekusi:** 14:00 – 23:00 WIB (Sesi London & New York Open).
-- **Setup BUY:**
-  1. Jarum candle M15 (`Low[-2]` atau `Low[-3]`) sempat menembus ke bawah `Asian Low` (06:00–14:00 WIB).
-  2. Lilin M15 ditutup kembali di atas `Asian Low` (`Close[-2] > Asian Low`).
-  3. Lilin konfirmasi bullish (`Close[-2] > Open[-2]`).
-  4. RSI 14 memantul dari area oversold (`RSI <= 35` dan `RSI[-2] > RSI[-3]`).
-  5. SL: `min(Low[-2], Low[-3]) - 1.00`. TP: Minimal 1:2 R:R.
-- **Setup SELL:**
-  1. Jarum candle M15 (`High[-2]` atau `High[-3]`) sempat menembus ke atas `Asian High`.
-  2. Lilin M15 ditutup kembali di bawah `Asian High` (`Close[-2] < Asian High`).
-  3. Lilin konfirmasi bearish (`Close[-2] < Open[-2]`).
-  4. RSI 14 memantul dari area overbought (`RSI >= 65` dan `RSI[-2] < RSI[-3]`).
-  5. SL: `max(High[-2], High[-3]) + 1.00`. TP: Minimal 1:2 R:R.
-
-##### Strategi B: HTF Trend Pullback (`strategies/trend_pullback.py`)
-
-- **Aktif Saat:** Rezim terdeteksi `TRENDING`.
-- **Waktu Eksekusi:** Fleksibel sepanjang sesi London & NY (14:00 – 02:00 WIB).
-- **Setup BUY (Uptrend H1):**
-  1. Harga di M15 terkoreksi turun menyentuh zona dinamis antara EMA 21 dan EMA 50 M15.
-  2. RSI 14 di M15 sempat menyentuh level 40–48 (area pullback sehat pada uptrend).
-  3. Muncul lilin konfirmasi rejection bullish (`Close[-2] > EMA 21[-2]`).
-  4. SL: 1.00 di bawah Swing Low koreksi terdekat. TP: Minimal 1:2 R:R.
-- **Setup SELL (Downtrend H1):**
-  1. Harga di M15 terkoreksi naik menyentuh zona dinamis antara EMA 21 dan EMA 50 M15.
-  2. RSI 14 di M15 sempat menyentuh level 52–60 (area pullback sehat pada downtrend).
-  3. Muncul lilin konfirmasi rejection bearish (`Close[-2] < EMA 21[-2]`).
-  4. SL: 1.00 di atas Swing High koreksi terdekat. TP: Minimal 1:2 R:R.
-
-#### 4.4. Modul Visualisasi Grafik (`chart_engine.py`)
-
-- Menggunakan `mplfinance` tema gelap (`nightclouds`).
-- **Panel Atas (Price):** 45 candle M15, EMA 21 (Kuning), EMA 50 (Oranye), garis Entry (Biru), SL (Merah), TP (Hijau).
-- **Panel Bawah (Oscillator):** Sub-panel RSI 14 (Ungu) dengan level 70 dan 30.
-- **Judul Gambar:** Wajib menyertakan rezim pasar dan strategi yang aktif (Contoh: `XAUUSD M15 - [TRENDING: PULLBACK BUY]`).
-
-#### 4.5. Modul Telegram & Eksekusi Semi-Otomatis (`telegram_bot.py` & `order_manager.py`)
-
-- Kirim snapshot foto beserta detail: Strategi yang terpicu, Rezim Pasar, Entry, SL, TP, dan Rekomendasi Lot (Risiko 1% modal).
-- Sediakan Inline Keyboard: `[🟢 Buka Posisi]` dan `[🔴 Abaikan]`.
-- **Auto-Expiry 5 Menit:** Background thread menghapus tombol setelah 300 detik dan membatalkan toleransi eksekusi jika diklik terlambat.
-- **Lifecycle Manager (Background Thread):**
-  - R:R 1:1 tercapai $\rightarrow$ Partial close 50% lot + geser SL ke Break-Even (+ $0.20 buffer).
-  - Melewati BE $\rightarrow$ Dynamic Trailing Stop aktif dengan jarak $2.00 dan step $0.50.
-
-#### 4.6. Database & Rekapitulasi Harian (`db_logger.py`)
-
-- SQLite database `trading_journal.db` mencatat deals tertutup (`DEAL_ENTRY_OUT`).
-- Kolom tambahan: Catat nama strategi yang digunakan (`session_sweep` atau `trend_pullback`).
-- Pukul 23:55 WIB: Render grafik kurva ekuitas dua panel (Equity & Drawdown) dan kirim rekap harian ke Telegram.
+#### 5.6. Database & Rekapitulasi Harian (`db_logger.py`)
+- Skema SQLite `trading_journal.db`:
+  - Catat setiap deal keluar (`DEAL_ENTRY_OUT`) dengan kolom: `deal_ticket`, `position_ticket`, `symbol`, `mode_used`, `trade_type`, `volume`, `close_time`, `net_profit`.
+- **Laporan Harian (23:55 WIB):**
+  - Ringkasan statistik performa dipisahkan berdasarkan mode (`SNIPER` vs `INTRADAY`).
+  - Render grafik kurva ekuitas (*Equity Curve & Drawdown*) dua panel berlatar gelap via Matplotlib.
+  - Kirim foto kurva ekuitas beserta rincian teks ke Telegram.
 
 ---
 
-### 5. ATURAN IMPLEMENTASI UNTUK AI AGENT
-
-1. **Pemisahan Logika:** Jangan campur kode deteksi tren H1 dengan logika eksekusi M15 di file yang sama. Gunakan struktur folder `strategies/`.
-2. **Kemandirian Komputasi:** Seluruh penghitungan ADX, EMA, dan RSI wajib menggunakan _pure pandas_. Dilarang mengimpor pustaka TA-Lib eksternal.
-3. **Traceability Log:** Terminal wajib mencetak rezim yang terdeteksi pada setiap pergantian candle M15 (contoh: `[REGIME] H1 ADX: 28.4 -> TRENDING. Memeriksa Trend Pullback...`).
+### 6. ATURAN PENERAPAN UNTUK AI CODING AGENT
+1. **Multi-Timeframe Polling:** Loop `main.py` harus memantau penutupan lilin M15 (untuk Mode Sniper) dan penutupan lilin M5 (untuk Mode Intraday) tanpa saling memblokir.
+2. **Kemandirian Komputasi:** Kalkulasi VWAP, ATR, ADX, EMA, dan RSI wajib menggunakan *pure pandas/numpy*. Dilarang menggunakan pustaka eksternal berbasis C seperti TA-Lib.
+3. **Pemberian Identitas Unik Callback:** Callback tombol Telegram wajib berformat `<action>:<trade_id>` untuk mematuhi batas 64 byte payload Telegram.
+4. **Isolasi Kegagalan:** Kesalahan jaringan pada scraper berita atau Telegram API tidak boleh menghentikan loop manajemen posisi aktif di MT5.

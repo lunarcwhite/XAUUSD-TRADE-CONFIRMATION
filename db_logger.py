@@ -1,4 +1,4 @@
-"""SQLite journal + equity curve + laporan harian 23:55 (PRD S4.6)."""
+"""SQLite journal + equity curve + laporan harian 23:55 per-mode (PRD V3.0 S5.6)."""
 import os
 import sqlite3
 import time
@@ -8,7 +8,24 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from config import DB_NAME, LOCAL_TZ, MAGIC_NUMBER
+from config import DB_NAME, LOCAL_TZ, MAGIC_NUMBER, MODE_INTRADAY, MODE_SNIPER
+
+
+def _current_mode() -> str:
+    """Mode aktif global (fallback SNIPER bila state_manager tak tersedia)."""
+    try:
+        from state_manager import bot_state
+        m = str(bot_state.current_mode or MODE_SNIPER).upper()
+        return m if m in (MODE_SNIPER, MODE_INTRADAY) else MODE_SNIPER
+    except Exception:
+        return MODE_SNIPER
+
+
+def _table_cols(conn, table) -> list:
+    try:
+        return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    except Exception:
+        return []
 
 
 def init_db():
@@ -34,6 +51,13 @@ def init_db():
             conn.execute("ALTER TABLE trade_history ADD COLUMN strategy TEXT DEFAULT ''")
     except Exception:
         pass
+    # PRD V3.0 S5.6: pemisah mode (SNIPER vs INTRADAY) untuk rekap harian.
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(trade_history)")]
+        if "mode_used" not in cols:
+            conn.execute("ALTER TABLE trade_history ADD COLUMN mode_used TEXT DEFAULT ''")
+    except Exception:
+        pass
     # Jurnal keputusan approval: approve / ignore / expire per sinyal.
     conn.execute(
         """CREATE TABLE IF NOT EXISTS signal_decisions (
@@ -41,6 +65,13 @@ def init_db():
             signal TEXT, entry REAL, sl REAL, tp REAL, lot REAL,
             created_at TEXT, decided_at TEXT, decision TEXT, detail TEXT)"""
     )
+    # PRD V3.0: mode pada jurnal keputusan (untuk audit trail Dual-Mode).
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(signal_decisions)")]
+        if "mode_used" not in cols:
+            conn.execute("ALTER TABLE signal_decisions ADD COLUMN mode_used TEXT DEFAULT ''")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -52,23 +83,43 @@ def log_signal(trade_id, info, decision="pending", detail=""):
         now_s = datetime.now(_TZ).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    mode = str(info.get("mode") or info.get("mode_used") or _current_mode()).upper()
     try:
+        init_db()
         conn = sqlite3.connect(DB_NAME)
-        conn.execute(
-            """INSERT INTO signal_decisions
-               (trade_id, user_id, strategy, regime, signal, entry, sl, tp, lot,
-                created_at, decided_at, decision, detail)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(trade_id) DO UPDATE SET
-                 decided_at=excluded.decided_at, decision=excluded.decision,
-                 detail=excluded.detail""",
-            (str(trade_id), str(info.get("user_id", "")),
-             str(info.get("strategy", "")), str(info.get("regime", "")),
-             str(info.get("action", info.get("signal", ""))),
-             float(info.get("entry", 0) or 0), float(info.get("sl", 0) or 0),
-             float(info.get("tp", 0) or 0), float(info.get("lot", 0) or 0),
-             str(info.get("created_at", now_s)), now_s, decision, detail),
-        )
+        cols = _table_cols(conn, "signal_decisions")
+        if "mode_used" in cols:
+            conn.execute(
+                """INSERT INTO signal_decisions
+                   (trade_id, user_id, strategy, regime, signal, entry, sl, tp, lot,
+                    created_at, decided_at, decision, detail, mode_used)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(trade_id) DO UPDATE SET
+                     decided_at=excluded.decided_at, decision=excluded.decision,
+                     detail=excluded.detail, mode_used=excluded.mode_used""",
+                (str(trade_id), str(info.get("user_id", "")),
+                 str(info.get("strategy", "")), str(info.get("regime", "")),
+                 str(info.get("action", info.get("signal", ""))),
+                 float(info.get("entry", 0) or 0), float(info.get("sl", 0) or 0),
+                 float(info.get("tp", 0) or 0), float(info.get("lot", 0) or 0),
+                 str(info.get("created_at", now_s)), now_s, decision, detail, mode),
+            )
+        else:  # DB lama tanpa mode_used
+            conn.execute(
+                """INSERT INTO signal_decisions
+                   (trade_id, user_id, strategy, regime, signal, entry, sl, tp, lot,
+                    created_at, decided_at, decision, detail)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(trade_id) DO UPDATE SET
+                     decided_at=excluded.decided_at, decision=excluded.decision,
+                     detail=excluded.detail""",
+                (str(trade_id), str(info.get("user_id", "")),
+                 str(info.get("strategy", "")), str(info.get("regime", "")),
+                 str(info.get("action", info.get("signal", ""))),
+                 float(info.get("entry", 0) or 0), float(info.get("sl", 0) or 0),
+                 float(info.get("tp", 0) or 0), float(info.get("lot", 0) or 0),
+                 str(info.get("created_at", now_s)), now_s, decision, detail),
+            )
         conn.commit()
         conn.close()
     except Exception as e:
@@ -95,6 +146,7 @@ def sync_closed_deals_to_sqlite(days_back=7):
             "close_price": d.price, "profit": d.profit, "commission": d.commission,
             "swap": d.swap,
             "net_profit": round(d.profit + d.commission + d.swap, 2),
+            "mode_used": _current_mode(),  # atribusi mode saat sync (best-effort)
         })
     return insert_closed_rows(rows)
 
@@ -111,40 +163,53 @@ def insert_closed_rows(rows, user_id="default"):
         try:
             uid = r.get("user_id") or user_id
             strat = r.get("strategy") or ""
+            mode = str(r.get("mode_used") or r.get("mode") or _current_mode()).upper()
             try:
                 cur.execute(
                     """INSERT OR IGNORE INTO trade_history
                        (deal_ticket, position_ticket, symbol, trade_type, volume,
-                        close_time, close_price, profit, commission, swap, net_profit, user_id, strategy)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        close_time, close_price, profit, commission, swap, net_profit, user_id, strategy, mode_used)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (r["deal_ticket"], r.get("position_ticket"), r.get("symbol"),
                      r.get("trade_type"), r.get("volume"), r.get("close_time"),
                      r.get("close_price"), r.get("profit"), r.get("commission"),
-                     r.get("swap"), r.get("net_profit"), uid, strat),
+                     r.get("swap"), r.get("net_profit"), uid, strat, mode),
                 )
             except sqlite3.OperationalError:
-                # Kompat skema lama: coba tanpa strategy, lalu skema orisinal 11 kolom.
+                # Kompat skema transisi (tanpa mode_used) / lama.
                 try:
                     cur.execute(
                         """INSERT OR IGNORE INTO trade_history
                            (deal_ticket, position_ticket, symbol, trade_type, volume,
-                            close_time, close_price, profit, commission, swap, net_profit, user_id)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            close_time, close_price, profit, commission, swap, net_profit, user_id, strategy)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (r["deal_ticket"], r.get("position_ticket"), r.get("symbol"),
                          r.get("trade_type"), r.get("volume"), r.get("close_time"),
                          r.get("close_price"), r.get("profit"), r.get("commission"),
-                         r.get("swap"), r.get("net_profit"), uid),
+                         r.get("swap"), r.get("net_profit"), uid, strat),
                     )
                 except sqlite3.OperationalError:
-                    # DB lama tanpa kolom user_id
-                    cur.execute(
-                        """INSERT OR IGNORE INTO trade_history VALUES
-                           (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (r["deal_ticket"], r.get("position_ticket"), r.get("symbol"),
-                     r.get("trade_type"), r.get("volume"), r.get("close_time"),
-                     r.get("close_price"), r.get("profit"), r.get("commission"),
-                     r.get("swap"), r.get("net_profit")),
-                )
+                    try:
+                        cur.execute(
+                            """INSERT OR IGNORE INTO trade_history
+                               (deal_ticket, position_ticket, symbol, trade_type, volume,
+                                close_time, close_price, profit, commission, swap, net_profit, user_id)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (r["deal_ticket"], r.get("position_ticket"), r.get("symbol"),
+                             r.get("trade_type"), r.get("volume"), r.get("close_time"),
+                             r.get("close_price"), r.get("profit"), r.get("commission"),
+                             r.get("swap"), r.get("net_profit"), uid),
+                        )
+                    except sqlite3.OperationalError:
+                        # DB lama tanpa kolom user_id
+                        cur.execute(
+                            """INSERT OR IGNORE INTO trade_history VALUES
+                               (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (r["deal_ticket"], r.get("position_ticket"), r.get("symbol"),
+                         r.get("trade_type"), r.get("volume"), r.get("close_time"),
+                         r.get("close_price"), r.get("profit"), r.get("commission"),
+                         r.get("swap"), r.get("net_profit")),
+                    )
             n += cur.rowcount
         except Exception:
             continue
@@ -162,22 +227,98 @@ def sync_via_broker(broker, days_back=7, user_id="default"):
         return 0
     for r in rows:
         r.setdefault("user_id", user_id)
+        r.setdefault("mode_used", _current_mode())
     return insert_closed_rows(rows, user_id=user_id)
 
 
+def _mode_of_row(row, cols) -> str:
+    """Atribusi mode 1 baris: mode_used > strategi intraday > SNIPER (legacy)."""
+    try:
+        if "mode_used" in cols and str(row.get("mode_used") or "").upper() in (MODE_SNIPER, MODE_INTRADAY):
+            return str(row["mode_used"]).upper()
+    except Exception:
+        pass
+    try:
+        if str(row.get("strategy") or "") == "intraday_vwap_m5":
+            return MODE_INTRADAY
+    except Exception:
+        pass
+    return MODE_SNIPER
+
+
+def daily_stats_by_mode(user_id=None, day=None, db_path=None):
+    """Statistik {SNIPER: {n,wins,pnl,wr}, INTRADAY: {...}} hari `day` (PRD 5.6).
+
+    Fail-open: DB/tabel hilang -> kedua mode nol.
+    """
+    try:
+        from config import DB_NAME as _DB, LOCAL_TZ as _TZ
+        day = day or datetime.now(_TZ).strftime("%Y-%m-%d")
+        path = db_path or _DB
+    except Exception:
+        return {m: {"n": 0, "wins": 0, "pnl": 0.0, "wr": 0.0}
+                for m in (MODE_SNIPER, MODE_INTRADAY)}
+    stats = {m: {"n": 0, "wins": 0, "pnl": 0.0, "wr": 0.0}
+             for m in (MODE_SNIPER, MODE_INTRADAY)}
+    try:
+        conn = sqlite3.connect(path)
+        try:
+            cols = _table_cols(conn, "trade_history")
+            if not cols:
+                return stats
+            q = "SELECT net_profit, mode_used, strategy FROM trade_history WHERE close_time LIKE ?"
+            params: list = [day + "%"]
+            if user_id is not None and "user_id" in cols:
+                q += " AND user_id=?"
+                params.append(str(user_id))
+            cur = conn.execute(q, params)
+            col_names = [d[0] for d in cur.description]
+            for tup in cur.fetchall():
+                row = dict(zip(col_names, tup))
+                m = _mode_of_row(row, cols)
+                try:
+                    pnl = float(row.get("net_profit") or 0.0)
+                except Exception:
+                    pnl = 0.0
+                stats[m]["n"] += 1
+                stats[m]["pnl"] += pnl
+                if pnl > 0:
+                    stats[m]["wins"] += 1
+        finally:
+            conn.close()
+    except Exception:
+        return stats
+    for m in stats:
+        n = stats[m]["n"]
+        stats[m]["wr"] = (stats[m]["wins"] / n * 100) if n else 0.0
+        stats[m]["pnl"] = round(stats[m]["pnl"], 2)
+    return stats
+
+
+def format_mode_breakdown(stats) -> str:
+    """Baris rekap per-mode untuk caption Telegram."""
+    try:
+        s, i = stats[MODE_SNIPER], stats[MODE_INTRADAY]
+        return (f"🔹 SNIPER: `{s['n']}` trade · WR `{s['wr']:.0f}%` · `{s['pnl']:+.2f}`\n"
+                f"🔸 INTRADAY: `{i['n']}` trade · WR `{i['wr']:.0f}%` · `{i['pnl']:+.2f}`")
+    except Exception:
+        return ""
+
+
 def generate_equity_curve(initial_balance=1000.0, filename="equity_curve.png", user_id=None):
-    """Kurva equity + drawdown%. user_id=None = semua user (kompat lama)."""
+    """Kurva equity + drawdown% + garis per-mode (PRD 5.6). user_id=None = semua user."""
     conn = sqlite3.connect(DB_NAME)
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(trade_history)")]
+        want_mode = "mode_used" in cols
+        sel = "SELECT close_time, net_profit" + (", mode_used, strategy" if want_mode or "strategy" in cols else "")
         if user_id and "user_id" in cols:
             df = pd.read_sql_query(
-                "SELECT close_time, net_profit FROM trade_history WHERE user_id=? ORDER BY close_time",
+                sel + " FROM trade_history WHERE user_id=? ORDER BY close_time",
                 conn, params=(user_id,))
         else:
             df = pd.read_sql_query(
-                "SELECT close_time, net_profit FROM trade_history ORDER BY close_time",
-                conn)
+                sel + " FROM trade_history ORDER BY close_time", conn)
     finally:
         conn.close()
     if df.empty:
@@ -204,6 +345,22 @@ def generate_equity_curve(initial_balance=1000.0, filename="equity_curve.png", u
              linewidth=2, label=f"Equity (${final_eq:,.2f})")
     ax1.fill_between(plot["close_time"], plot["equity"], initial_balance,
                      alpha=0.15, color="#29B6F6")
+    # Garis per-mode (SNIPER oranye, INTRADAY hijau) bila atribusi tersedia.
+    try:
+        if "mode_used" in df.columns or "strategy" in df.columns:
+            col_list = list(df.columns)
+            for m, color in ((MODE_SNIPER, "#FF9800"), (MODE_INTRADAY, "#66BB6A")):
+                sub = df[[_mode_of_row(r, col_list) == m for _, r in df.iterrows()]]
+                if not sub.empty:
+                    sub = sub.copy()
+                    sub["close_time"] = pd.to_datetime(sub["close_time"])
+                    sub = sub.sort_values("close_time")
+                    sub_eq = initial_balance + sub["net_profit"].astype(float).cumsum()
+                    ax1.plot(sub["close_time"], sub_eq, color=color, linewidth=1.2,
+                             linestyle="--", alpha=0.9,
+                             label=f"{m} ({sub['net_profit'].sum():+.0f})")
+    except Exception as e:
+        print(f"[WARN] kurva per-mode: {e}")
     ax1.axhline(initial_balance, color="#78909C", linestyle="--", linewidth=1)
     ax1.set_title("XAU/USD Performance: Equity Curve & Drawdown",
                   fontsize=13, fontweight="bold", color="#ECEFF1")
@@ -251,10 +408,12 @@ def daily_reporter(send_text, send_photo):
             n, wins = len(today), int((today["net_profit"] > 0).sum())
             pnl = float(today["net_profit"].sum()) if n else 0.0
             wr = wins / n * 100 if n else 0.0
+            breakdown = format_mode_breakdown(daily_stats_by_mode(day=now.strftime("%Y-%m-%d")))
             caption = (
                 f"📋 *LAPORAN HARIAN XAU/USD* `{now:%d %B %Y}`\n━━━━\n"
                 f"🔢 Trade: `{n}` | ✅ `{wins}` | 🎯 WR `{wr:.1f}%`\n"
-                f"{'🟢' if pnl >= 0 else '🔴'} *PnL hari ini:* `{pnl:+.2f}`\n━━━━\n"
+                f"{'🟢' if pnl >= 0 else '🔴'} *PnL hari ini:* `{pnl:+.2f}`\n"
+                f"{breakdown}\n━━━━\n"
                 f"📈 Total PnL: `{total_pnl:+.2f}` | Max DD: `{max_dd:.2f}%`\n"
                 f"🏦 Saldo: `${balance:,.2f}`")
             if img and os.path.exists(img):
@@ -300,10 +459,13 @@ def daily_reporter_generic(broker, send_text, send_photo, user_id="default", sto
             n, wins = len(today), int((today["net_profit"] > 0).sum())
             pnl = float(today["net_profit"].sum()) if n else 0.0
             wr = wins / n * 100 if n else 0.0
+            breakdown = format_mode_breakdown(
+                daily_stats_by_mode(user_id=user_id, day=now.strftime("%Y-%m-%d")))
             caption = (
                 f"📋 *LAPORAN HARIAN XAU/USD [{label}]* `{now:%d %B %Y}`\n━━━━\n"
                 f"🔢 Trade: `{n}` | ✅ `{wins}` | 🎯 WR `{wr:.1f}%`\n"
-                f"{'🟢' if pnl >= 0 else '🔴'} *PnL hari ini:* `{pnl:+.2f}`\n━━━━\n"
+                f"{'🟢' if pnl >= 0 else '🔴'} *PnL hari ini:* `{pnl:+.2f}`\n"
+                f"{breakdown}\n━━━━\n"
                 f"📈 Total PnL: `{total_pnl:+.2f}` | Max DD: `{max_dd:.2f}%`\n"
                 f"🏦 Saldo: `${balance:,.2f}`")
             if img and os.path.exists(img):

@@ -1,4 +1,4 @@
-"""Entry point: multi-user + registrasi mandiri + loop detektor bar M15 (PRD S3)."""
+"""Entry point: multi-user + registrasi mandiri + loop Dual-Mode M15/M5 (PRD V3.0)."""
 import os
 import sys
 import threading
@@ -20,10 +20,14 @@ from config import (
     DAILY_MAX_LOSS_PCT,
     LOCAL_TZ,
     MAX_OPEN_POSITIONS,
+    MODE_INTRADAY,
+    MODE_SNIPER,
     OPEN_REGISTRATION,
     POST_NEWS_COOLDOWN_MINUTES,
     SIGNAL_COOLDOWN_MINUTES,
     TELEGRAM_CHAT_ID,
+    drift_for_mode,
+    expiry_for_mode,
     load_users,
     user_symbol,
     validate_config,
@@ -51,7 +55,8 @@ from telegram_bot import (
     telegram_button_listener,
 )
 from broker_base import create_broker_for_user
-from order_manager import generic_position_lifecycle_manager
+from order_manager import check_price_drift, generic_position_lifecycle_manager
+from state_manager import bot_state
 from db_logger import daily_reporter_generic, init_db
 import user_store
 
@@ -133,6 +138,11 @@ def spawn_session(user):
                            lambda img, cap, c=chat: send_photo_raw_to(c, img, cap),
                            uid, stop),
                      daemon=True).start()
+    try:  # PRD 5.1: Auto-Flat 23:00 WIB (hanya bereaksi saat mode INTRADAY).
+        bot_state.start_auto_flat_thread(
+            broker, lambda m, c=chat: send_text_to(c, m), sym, stop)
+    except Exception as e:
+        print(f"[WARN] auto-flat {uid}: {e}")
     print(f"[SESSION] {uid} aktif [{broker.name}:{sym}].")
     return True
 
@@ -194,23 +204,33 @@ def session_by_chat(chat_id):
 
 def broadcast_signal(sessions, signal, entry, sl, tp, reason, df,
                        strategy="session_sweep", regime="RANGING", risk_mult=1.0,
-                       news_ok=True):
-    """Kirim 1 sinyal ke semua user; lot dihitung per-broker/risk masing-masing."""
+                       news_ok=True, mode=None, vwap=None, atr=None):
+    """Kirim 1 sinyal ke semua user; lot dihitung per-broker/risk masing-masing.
+
+    PRD 5.4: header [MODE: INTRADAY M5]/[MODE: SNIPER M15], expiry 90/300 dtk,
+    caption Intraday sertakan VWAP + ATR. Expiry disimpan per-trade agar
+    listener/cleaner menghormati mode saat klik.
+    """
     from datetime import timedelta as _td
 
-    from config import EXPIRY_SECONDS
+    mode = str(mode or bot_state.current_mode or MODE_SNIPER).upper()
+    expiry_s = expiry_for_mode(mode)
+    tf_label = "M5" if mode == MODE_INTRADAY else "M15"
+    mode_tag = f"[MODE: {mode} {tf_label}]"
     rr = round(abs(tp - entry) / abs(entry - sl), 1) if abs(entry - sl) > 0 else 0.0
     base = int(time.time())
     ref_symbol = sessions[0]["symbol"] if sessions else "XAUUSD"
     img = f"signal_{base}.png"
-    title_suffix = f"[{regime}: {strategy.upper()} {signal}]"
+    title_suffix = f"{mode_tag} [{regime}: {strategy.upper()} {signal}]"
     try:
         generate_signal_chart(df, entry, sl, tp, ref_symbol, filename=img,
-                              title_suffix=title_suffix)
+                              title_suffix=title_suffix, vwap=vwap,
+                              timeframe=tf_label)
     except TypeError:
-        # chart_engine lama tanpa title_suffix
+        # chart_engine lama tanpa vwap/timeframe
         try:
-            generate_signal_chart(df, entry, sl, tp, ref_symbol, filename=img)
+            generate_signal_chart(df, entry, sl, tp, ref_symbol, filename=img,
+                                  title_suffix=title_suffix)
         except Exception as e:
             print(f"[ERROR] chart: {e}")
             return
@@ -222,7 +242,17 @@ def broadcast_signal(sessions, signal, entry, sl, tp, reason, df,
         _now = datetime.now(_TZ)
     except Exception:
         _now = datetime.now()
-    expire_s = (_now + _td(seconds=EXPIRY_SECONDS)).strftime("%H:%M")
+    expire_s = (_now + _td(seconds=expiry_s)).strftime("%H:%M")
+    confirm_txt = "Konfirmasi dalam 90 detik:" if mode == MODE_INTRADAY \
+        else "Konfirmasi dalam 5 menit:"
+    vwap_line = ""
+    try:
+        if vwap is not None and atr is not None:
+            import math as _math
+            if not _math.isnan(float(vwap)) and not _math.isnan(float(atr)):
+                vwap_line = f"\n📏 VWAP `{float(vwap):.2f}` | ATR(14) `{float(atr):.2f}`"
+    except Exception:
+        vwap_line = ""
     try:
         for i, s in enumerate(sessions):
             user, broker = s["user"], s["broker"]
@@ -246,20 +276,21 @@ def broadcast_signal(sessions, signal, entry, sl, tp, reason, df,
             trade_id = f"{user['id']}:tr_{base}_{i}"
             paper_note = "\n🧪 *PAPER — uang virtual, tanpa eksekusi real*" if broker.name == "paper" else ""
             caption = (
-                f"🎯 *SINYAL {s['symbol']} {signal} [{broker.name}]*{paper_note}\n━━━━\n"
+                f"{mode_tag} 🎯 *SINYAL {s['symbol']} {signal} [{broker.name}]*{paper_note}\n━━━━\n"
                 f"🧭 Rezim `{regime}` | Strategi `{strategy}`\n"
                 f"📌 {reason}\n"
-                f"💵 Entry `{entry:.2f}` | 🛑 SL `{sl:.2f}` | 🎯 TP `{tp:.2f}` (1:{rr})\n"
+                f"💵 Entry `{entry:.2f}` | 🛑 SL `{sl:.2f}` | 🎯 TP `{tp:.2f}` (1:{rr}){vwap_line}\n"
                 f"⚖️ Lot `{lot}` (risiko {risk_pct:g}%)\n"
                 f"🕒 Berlaku s/d `{expire_s}`\n"
                 f"🛡️ Gov: pos `{npos}` · daily `{daily:+.2f}` · "
                 f"news `{'clear' if news_ok else 'BLOKIR?'}`\n━━━━\n"
-                f"Konfirmasi dalam 5 menit:")
+                f"{confirm_txt}")
             msg_id = send_photo_to(user["telegram_chat_id"], img, caption, trade_id)
             if msg_id:
                 info = {
                     "user_id": user["id"],
                     "strategy": strategy, "regime": regime,
+                    "mode": mode, "expiry_seconds": expiry_s,
                     "symbol": s["symbol"], "action": signal, "entry": entry,
                     "sl": sl, "tp": tp, "lot": lot,
                     "created_at": datetime.now(), "chat_id": user["telegram_chat_id"],
@@ -505,6 +536,16 @@ def main():
                 return False, f"Ditolak governor: sudah ada #{poss[0].ticket}"
         except Exception:
             pass
+        # PRD 5.4 Price Drift Guard: bandingkan tick live vs entry sinyal.
+        try:
+            ok_drift, drift_msg = check_price_drift(
+                trade, broker=sess["broker"],
+                mode=trade.get("mode") or bot_state.current_mode)
+            if not ok_drift:
+                print(f"[DRIFT-BLOK] {trade.get('entry')} -> {drift_msg}")
+                return False, drift_msg
+        except Exception as e:
+            print(f"[WARN] drift guard: {e}")
         try:
             return sess["broker"].market_order(
                 trade.get("symbol"), trade.get("action"),
@@ -513,7 +554,11 @@ def main():
         except Exception as e:
             return False, f"Eksekusi gagal: {e}"
 
-    def on_command(chat_id, cmd):
+    def on_command(chat_id, full_text):
+        # Listener kini kirim teks utuh (cth. "/mode intraday"); parse di sini.
+        parts = str(full_text or "").strip().split()
+        cmd = parts[0].split("@")[0].lower() if parts else ""
+        arg = parts[1] if len(parts) > 1 else ""
         s = session_by_chat(chat_id)
         if cmd == "/start":
             if s is not None:
@@ -523,11 +568,22 @@ def main():
         if s is None:
             return "⛔ Unauthorized. /start untuk daftar."
         user, broker, sym = s["user"], s["broker"], s["symbol"]
+        if cmd == "/mode":
+            if not arg:
+                return (f"🔀 Mode aktif: `{bot_state.current_mode}`\n"
+                        f"Gunakan: `/mode <sniper|intraday>`")
+            changed, reply = bot_state.parse_mode_command(f"/mode {arg}")
+            if changed:
+                print(f"[MODE] {chat_id} -> {bot_state.current_mode}")
+            return reply
         if cmd in ("/help",):
             return (
                 f"🤖 *XAUUSD Bot [{broker.name}]*\n━━━━\n"
                 f"Mode `{user['broker_mode']}` | Symbol `{sym}`\n"
-                f"Window 14:00-23:00 WIB, approve 5 mnt.\n━━━━\n"
+                f"Strategi `{bot_state.current_mode}` "
+                f"({'M5 VWAP, approve 90 dtk' if bot_state.current_mode == MODE_INTRADAY else 'M15, approve 5 mnt'})\n"
+                f"Window Sniper 14:00-23:00, Intraday 14:30-17 & 19:30-22:30 WIB.\n━━━━\n"
+                f"/mode <sniper|intraday> — ganti mode strategi\n"
                 f"/status — saldo, posisi, sinyal pending\n"
                 f"/test — contoh sinyal + tombol (tanpa eksekusi)\n"
                 f"/unlink — putus akun dari chat ini" +
@@ -546,12 +602,20 @@ def main():
                            if str(t.get("chat_id")) == str(chat_id))
             lines = [
                 f"📊 *STATUS [{user['id']}:{broker.name}]*",
+                f"🔀 Strategi: `{bot_state.current_mode}`",
                 f"🏦 Saldo: `${bal:,.2f}`",
                 f"📌 Posisi terbuka: `{len(poss)}`",
             ]
             for p in poss[:5]:
                 lines.append(f"• #{p.ticket} {p.side} {p.volume_lot} @ `{p.price_open:.2f}` SL `{p.sl:.2f}`")
             lines.append(f"⏳ Sinyal pending: `{pend}`")
+            if bot_state.current_mode == MODE_INTRADAY:
+                try:
+                    t, pnl = bot_state.get_today_stats(user_id=user["id"])
+                    lines.append(f"📊 Intraday hari ini: `{t}/3` trade · PnL `{pnl:+.2f}`"
+                                 + (" · ⛔ KILL" if bot_state.kill_switch_active else ""))
+                except Exception:
+                    pass
             return "\n".join(lines)
         if cmd == "/test":
             feed = live_sessions()
@@ -579,6 +643,8 @@ def main():
                 return "Gagal kirim chart test."
             register_trade(trade_id, {
                 "user_id": user["id"], "test": True,
+                "mode": bot_state.current_mode,
+                "expiry_seconds": expiry_for_mode(bot_state.current_mode),
                 "symbol": sym, "action": "BUY", "entry": entry,
                 "sl": sl, "tp": tp, "lot": 0.01,
                 "created_at": datetime.now(), "chat_id": chat_id,
@@ -638,41 +704,89 @@ def main():
         for symbol, gsessions in groups.items():
             feed = gsessions[0]
             mtf = _fetch_mtf(feed["broker"], symbol)
-            df = mtf.get("M15")
-            if df is None or len(df) < 60:
-                time.sleep(5)
-                continue
-            if df.iloc[-2]["time"] == main._last_bars.get(symbol):
-                continue
-            main._last_bars[symbol] = df.iloc[-2]["time"]
-            print(f"\n[{now:%H:%M:%S}] Bar M15 {symbol} tutup, evaluasi rezim...")
-            df = add_indicators(df)
-            if "EMA21" not in df.columns:
-                df["EMA21"] = df["close"].ewm(span=21, adjust=False).mean()
-            blocked, title = is_in_news_blackout(events_cache["events"])
-            if blocked:
-                print(f"⛔ Blackout: {title}.")
-                continue
-            try:
-                res = route_strategy(
-                    mtf.get("H1"), df, events_cache.get("events"), now)
-                if len(res) == 8:
+            mode = str(bot_state.current_mode or MODE_SNIPER).upper()
+            if mode == MODE_INTRADAY:
+                m5 = mtf.get("M5")
+                if m5 is None or len(m5) < 30:
+                    time.sleep(5)
+                    continue
+                bar_key = f"{symbol}:M5"
+                if m5.iloc[-2]["time"] == main._last_bars.get(bar_key):
+                    continue
+                main._last_bars[bar_key] = m5.iloc[-2]["time"]
+                print(f"\n[{now:%H:%M:%S}] Bar M5 {symbol} tutup, evaluasi INTRADAY...")
+                blocked, title = is_in_news_blackout(events_cache["events"])
+                if blocked:
+                    print(f"⛔ Blackout: {title}.")
+                    continue
+                m15_ctx = mtf.get("M15")
+                try:
+                    res = route_strategy(
+                        mtf.get("H1"), m15_ctx, events=events_cache.get("events"),
+                        now=now, mode=mode, m5_df=m5)
                     signal, entry, sl, tp, reason, regime, strategy, risk_mult = res
-                else:  # kompat router lama 7-tuple
-                    signal, entry, sl, tp, reason, regime, strategy = res
-                    risk_mult = 1.0
-                label = {"TRENDING": "Trend Pullback/Breakout",
-                         "POST_NEWS": "Post-News",
-                         "RANGING": "Session Sweep"}.get(regime, regime)
-                print(f"[REGIME] {reason.split(':')[0]}. Memeriksa {label}...")
-            except Exception as e:
-                print(f"[ERROR] router: {e}")
-                signal, entry, sl, tp, reason = evaluate_session_strategy(df)
-                regime, strategy, risk_mult = "RANGING", "session_sweep", 1.0
+                    label = "Intraday VWAP M5"
+                    print(f"[INTRADAY] {reason.split(':')[0]}. Memeriksa {label}...")
+                except Exception as e:
+                    print(f"[ERROR] router intraday: {e}")
+                    continue
+                chart_df = m5
+                try:
+                    from strategies.intraday_vwap_m5 import get_vwap_atr
+                    vwap_v, atr_v = get_vwap_atr(m5)
+                except Exception:
+                    vwap_v, atr_v = None, None
+            else:
+                df = mtf.get("M15")
+                if df is None or len(df) < 60:
+                    time.sleep(5)
+                    continue
+                bar_key = f"{symbol}:M15"
+                if df.iloc[-2]["time"] == main._last_bars.get(bar_key):
+                    continue
+                main._last_bars[bar_key] = df.iloc[-2]["time"]
+                print(f"\n[{now:%H:%M:%S}] Bar M15 {symbol} tutup, evaluasi rezim...")
+                df = add_indicators(df)
+                if "EMA21" not in df.columns:
+                    df["EMA21"] = df["close"].ewm(span=21, adjust=False).mean()
+                blocked, title = is_in_news_blackout(events_cache["events"])
+                if blocked:
+                    print(f"⛔ Blackout: {title}.")
+                    continue
+                try:
+                    res = route_strategy(
+                        mtf.get("H1"), df, events=events_cache.get("events"),
+                        now=now, mode=mode)
+                    if len(res) == 8:
+                        signal, entry, sl, tp, reason, regime, strategy, risk_mult = res
+                    else:  # kompat router lama 7-tuple
+                        signal, entry, sl, tp, reason, regime, strategy = res
+                        risk_mult = 1.0
+                    label = {"TRENDING": "Trend Pullback/Breakout",
+                             "POST_NEWS": "Post-News",
+                             "RANGING": "Session Sweep"}.get(regime, regime)
+                    print(f"[REGIME] {reason.split(':')[0]}. Memeriksa {label}...")
+                except Exception as e:
+                    print(f"[ERROR] router: {e}")
+                    signal, entry, sl, tp, reason = evaluate_session_strategy(df)
+                    regime, strategy, risk_mult = "RANGING", "session_sweep", 1.0
+                chart_df = df
+                vwap_v, atr_v = None, None
             if signal:
                 eligible, skipped = [], []
                 for s in gsessions:
                     uid = s["user"]["id"]
+                    if mode == MODE_INTRADAY:
+                        # Rem harian PRD 5.1 (kuota 3, kill 2%, cutoff 22:30).
+                        try:
+                            bal = float(s["broker"].get_balance() or 0.0)
+                        except Exception:
+                            bal = 0.0
+                        blocked_m, why_m = bot_state.should_block_signal(
+                            user_id=uid, now=now, balance=bal)
+                        if blocked_m:
+                            skipped.append((s, f"MODE {uid}: {why_m}"))
+                            continue
                     if strategy == "post_news":
                         # Guard FOMO: jeda khusus antar sinyal post_news (di atas
                         # cooldown global 60 mnt yang tetap berlaku).
@@ -692,8 +806,9 @@ def main():
                     print(f"[SKIP] {reason} (governor: semua user terblokir)")
                 else:
                     broadcast_signal([s for s, _ in eligible], signal, entry, sl,
-                                     tp, reason, df, strategy=strategy,
-                                     regime=regime, risk_mult=risk_mult)
+                                     tp, reason, chart_df, strategy=strategy,
+                                     regime=regime, risk_mult=risk_mult,
+                                     mode=mode, vwap=vwap_v, atr=atr_v)
                     for s, _ in eligible:
                         LAST_SIGNAL[s["user"]["id"]] = now
                         if strategy == "post_news":

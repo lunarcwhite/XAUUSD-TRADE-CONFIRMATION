@@ -1,4 +1,4 @@
-"""Eksekusi MT5 + lifecycle Partial/BE/trailing + generik dual-broker (PRD S4.5)."""
+"""Eksekusi MT5 + lifecycle Partial/BE/trailing + generik dual-broker (PRD V3.0 S5.4-5.5)."""
 import time
 
 from config import (
@@ -8,6 +8,7 @@ from config import (
     RISK_PERCENT,
     TRAILING_DISTANCE,
     TRAILING_STEP,
+    drift_for_mode,
 )
 
 
@@ -17,6 +18,67 @@ def _mt5():
     return mt5
 
 done_11 = set()  # tiket yang sudah lewat Fase 1 (1:1)
+
+
+def trailing_now(mode=None) -> float:
+    """Jarak trailing aktif: $1.50 Intraday vs $2.00 Sniper (PRD 5.5).
+
+    mode None -> baca state_manager.bot_state live agar /mode switch
+    langsung berlaku untuk posisi berjalan.
+    """
+    try:
+        if mode is None:
+            from state_manager import bot_state
+            mode = bot_state.current_mode
+        from config import trailing_for_mode
+        return float(trailing_for_mode(mode))
+    except Exception:
+        return float(TRAILING_DISTANCE)
+
+
+def check_price_drift(trade, tick_price=None, broker=None, mode=None):
+    """Price Drift Guard (PRD 5.4): tolak eksekusi bila tick bergeser > batas mode.
+
+    tick_price None + broker ada -> ambil tick live (ask BUY / bid SELL).
+    Return (ok: bool, detail: str). Gagal ambil tick -> fail-open True
+    agar tak blokir eksekusi saat feed glitch (alasan dicatat).
+    """
+    try:
+        entry = float(trade.get("entry", 0) or 0)
+    except Exception:
+        return True, "drift skip: entry invalid"
+    if mode is None:
+        mode = trade.get("mode") or trade.get("mode_used")
+    if mode is None:
+        try:
+            from state_manager import bot_state
+            mode = bot_state.current_mode
+        except Exception:
+            mode = "SNIPER"
+    try:
+        limit = float(drift_for_mode(mode))
+    except Exception:
+        limit = 1.50
+    px = tick_price
+    if px is None and broker is not None:
+        try:
+            tick = broker.get_tick(trade.get("symbol"))
+            if tick is None:
+                return True, "drift skip: tick tak tersedia"
+            is_buy = str(trade.get("action", "")).upper() == "BUY"
+            px = float(tick.ask if is_buy else tick.bid)
+        except Exception as e:
+            return True, f"drift skip: tick error ({e})"
+    if px is None:
+        return True, "drift skip: tanpa harga pembanding"
+    try:
+        drift = abs(float(px) - entry)
+    except Exception:
+        return True, "drift skip: harga invalid"
+    if drift > limit:
+        return (False,
+                f"❌ Order Dibatalkan: Harga telah bergeser > ${limit:.2f} dari kalkulasi awal!")
+    return True, f"drift ok (${drift:.2f} <= ${limit:.2f})"
 
 
 def calculate_lot(entry, sl):
@@ -105,7 +167,7 @@ def execute_partial_close(pos, ratio=0.5):
 
 
 def position_lifecycle_manager(send_text):
-    """Partial 50% + BE di 1:1, lalu trailing $2.00/step $0.50. Poll 2 dtk (MT5)."""
+    """Partial 50% + BE di 1:1, lalu trailing $2.00/$1.50 per mode. Poll 2 dtk (MT5)."""
     mt5 = _mt5()
     print("🚀 Lifecycle manager aktif (Partial + BE + Trailing)...")
     while True:
@@ -140,7 +202,8 @@ def position_lifecycle_manager(send_text):
                     print(f"[PARTIAL+BE] #{pos.ticket}")
                 elif ((is_buy and pos.sl >= pos.price_open)
                         or (not is_buy and pos.sl <= pos.price_open)):
-                    pot = px - TRAILING_DISTANCE if is_buy else px + TRAILING_DISTANCE
+                    _trail = trailing_now()
+                    pot = px - _trail if is_buy else px + _trail
                     if ((is_buy and pot > pos.sl + TRAILING_STEP)
                             or (not is_buy and pot < pos.sl - TRAILING_STEP)):
                         if modify_position_sl(pos.ticket, pos.symbol, pot, pos.tp):
@@ -168,7 +231,7 @@ def make_execute_via_broker(broker):
 
 
 def generic_position_lifecycle_manager(broker, send_text, symbol=None, stop_event=None):
-    """Lifecycle broker-agnostic: Partial 50% + BE di 1:1, trailing $2.00/step $0.50."""
+    """Lifecycle broker-agnostic: Partial 50% + BE di 1:1, trailing per-mode."""
     print(f"🚀 Lifecycle manager aktif [{getattr(broker, 'name', '?')}] ...")
     while stop_event is None or not stop_event.is_set():
         try:
@@ -202,7 +265,8 @@ def generic_position_lifecycle_manager(broker, send_text, symbol=None, stop_even
                     print(f"[PARTIAL+BE] #{pos.ticket}")
                 elif ((is_buy and pos.sl >= pos.price_open)
                         or (not is_buy and pos.sl <= pos.price_open)):
-                    pot = px - TRAILING_DISTANCE if is_buy else px + TRAILING_DISTANCE
+                    _trail = trailing_now()
+                    pot = px - _trail if is_buy else px + _trail
                     if ((is_buy and pot > pos.sl + TRAILING_STEP)
                             or (not is_buy and pot < pos.sl - TRAILING_STEP)):
                         if broker.modify_sltp(pos.ticket, pos.symbol, pot, pos.tp):

@@ -1,4 +1,4 @@
-"""Notifikasi sinyal + tombol persetujuan + expiry 5 menit (PRD S4.4)."""
+"""Notifikasi sinyal + tombol persetujuan + expiry dinamis Dual-Mode (PRD V3.0 S5.4)."""
 import json
 import threading
 import time
@@ -109,6 +109,14 @@ def register_trade(trade_id, trade):
         pending_trades[trade_id] = trade
 
 
+def trade_expiry_seconds(trade) -> int:
+    """Expiry per-trade (90 dtk Intraday, 300 dtk Sniper). Fallback global."""
+    try:
+        return int(trade.get("expiry_seconds") or EXPIRY_SECONDS)
+    except Exception:
+        return EXPIRY_SECONDS
+
+
 def _record_decision(trade_id, trade, decision, detail=""):
     """Jurnal approve/ignore/expire ke SQLite (best-effort, tak boleh matikan listener)."""
     try:
@@ -122,9 +130,10 @@ def telegram_button_listener(on_execute, on_command=None, on_text=None):
     """Long-poll getUpdates.
 
     on_execute(trade) -> (ok, detail). Trade test (/test) tidak dieksekusi.
-    on_command(chat_id, command) -> reply str | None (command /xxx).
+    on_command(chat_id, full_text) -> reply str | None. full_text = pesan utuh
+      (cth. "/mode intraday") agar command ber-argumen bisa diparse main.
     on_text(chat_id, text) -> reply str | None (pesan biasa, cth. onboarding).
-    Guard user + 300 dtk.
+    Guard user + expiry per-trade (90/300 dtk).
     """
     print("🤖 Telegram listener aktif...")
     offset = 0
@@ -144,14 +153,14 @@ def telegram_button_listener(on_execute, on_command=None, on_text=None):
                     if text.startswith("/"):
                         if on_command is None:
                             continue
-                        cmd = text.split()[0].split("@")[0].lower()
+                        cmd_word = text.split()[0].split("@")[0].lower()
                         # /start selalu diteruskan (pintu onboarding user baru).
-                        if cmd not in ("/start",) and _AUTHORIZED_CHATS \
+                        if cmd_word not in ("/start",) and _AUTHORIZED_CHATS \
                                 and str(chat_id) not in _AUTHORIZED_CHATS:
                             send_text_to(chat_id, "⛔ Unauthorized.")
                             continue
                         try:
-                            reply = on_command(str(chat_id), cmd)
+                            reply = on_command(str(chat_id), text.strip())
                         except Exception as e:
                             reply = f"Command gagal: {e}"
                         if reply:
@@ -184,13 +193,13 @@ def telegram_button_listener(on_execute, on_command=None, on_text=None):
                 if str(trade.get("chat_id")) != str(chat_id):
                     answer_callback(cb["id"], "Bukan sinyal untuk akun ini.")
                     continue
-                if (datetime.now() - trade["created_at"]).total_seconds() > EXPIRY_SECONDS:
+                if (datetime.now() - trade["created_at"]).total_seconds() > trade_expiry_seconds(trade):
                     answer_callback(cb["id"], "⚠️ Waktu konfirmasi habis.")
                     edit_caption(chat_id, msg_id,
                                  f"{caption}\n\n⏰ *STATUS: KEDALUWARSA*")
                     with _lock:
                         pending_trades.pop(trade_id, None)
-                    _record_decision(trade_id, trade, "expired", "klik setelah 5 mnt")
+                    _record_decision(trade_id, trade, "expired", "klik setelah expiry")
                     continue
 
                 if action == "exec":
@@ -224,21 +233,21 @@ def telegram_button_listener(on_execute, on_command=None, on_text=None):
 
 
 def trade_expiry_cleaner():
-    """Hapus tombol sinyal yang tak diklik dalam 5 menit."""
-    print("⏳ Expiry cleaner aktif (5 menit)...")
+    """Hapus tombol sinyal yang tak diklik dalam expiry per-trade (90/300 dtk)."""
+    print("⏳ Expiry cleaner aktif (90/300 dtk per mode)...")
     while True:
         try:
             now = datetime.now()
             with _lock:
                 expired = [tid for tid, t in pending_trades.items()
-                           if (now - t["created_at"]).total_seconds() > EXPIRY_SECONDS]
+                           if (now - t["created_at"]).total_seconds() > trade_expiry_seconds(t)]
             for tid in expired:
                 with _lock:
                     trade = pending_trades.pop(tid, None)
                 if trade and trade.get("message_id"):
                     edit_caption(trade["chat_id"], trade["message_id"],
                                  f"{trade['caption']}\n\n⏰ *STATUS: KEDALUWARSA*")
-                _record_decision(tid, trade or {}, "expired", "tanpa klik 5 mnt")
+                _record_decision(tid, trade or {}, "expired", "tanpa klik (expiry mode)")
                 print(f"[EXPIRED] {tid}")
         except Exception as e:
             print(f"[ERROR] cleaner: {e}")

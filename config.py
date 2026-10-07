@@ -121,15 +121,74 @@ CTRADER_SYMBOL = os.getenv("CTRADER_SYMBOL", "XAUUSD").strip().upper() or "XAUUS
 # SYMBOL dipakai untuk mode MT5. Mode OANDA pakai OANDA_INSTRUMENT (default XAU_USD).
 SYMBOL = "XAUUSD"
 TIMEFRAME = 15  # mt5.TIMEFRAME_M15 (tanpa import mt5 agar ringan diuji)
+TIMEFRAME_M5 = 5  # mt5.TIMEFRAME_M5 (kompat regime_classifier lama)
+TIMEFRAME_M15 = 15  # mt5.TIMEFRAME_M15 (kompat regime_classifier lama)
+TIMEFRAME_H1 = 60  # mt5.TIMEFRAME_H1 (kompat regime_classifier lama)
 RISK_PERCENT = 0.01  # 1% modal per sinyal
 MAGIC_NUMBER = 1002026
 DEVIATION = 30  # slippage maks 30 poin ($0.30)
-EXPIRY_SECONDS = 300  # timeout persetujuan Telegram 5 menit
+EXPIRY_SECONDS = 300  # timeout persetujuan Telegram 5 menit (default SNIPER, kompat lama)
 
-# Lifecycle: BE + trailing (PRD S4.5)
+# Lifecycle: BE + trailing (PRD S4.5, default SNIPER)
 BE_BUFFER = 0.20  # $0.20 di atas/bawah entry
-TRAILING_DISTANCE = 2.00  # $2.00 di belakang harga
+TRAILING_DISTANCE = 2.00  # $2.00 di belakang harga (default SNIPER)
 TRAILING_STEP = 0.50  # update SL min $0.50 (anti-spam)
+
+# ================= DUAL-MODE V3.0 (PRD S4) =================
+# Mode operasional: SNIPER (M15 selektif) atau INTRADAY (M5 cepat + rem harian).
+# Bisa di-override via env BOT_MODE=sniper|intraday.
+MODE_SNIPER = "SNIPER"
+MODE_INTRADAY = "INTRADAY"
+BOT_MODE = os.getenv("BOT_MODE", MODE_SNIPER).strip().upper() or MODE_SNIPER
+if BOT_MODE not in (MODE_SNIPER, MODE_INTRADAY):
+    BOT_MODE = MODE_SNIPER
+
+# --- Sniper / Precision Mode (M15) ---
+SNIPER_TIMEFRAME = "M15"
+SNIPER_EXPIRY_SECONDS = 300  # 5 menit (PRD S4: tombol Sniper)
+SNIPER_MAX_DRIFT = 1.50  # $1.50 toleransi geser harga
+SNIPER_TRAILING_DISTANCE = 2.00  # $2.00 di belakang harga
+SNIPER_SL_BUFFER = 1.00  # Swing M15 +/- $1.00
+SNIPER_EXEC_START_HOUR = 14
+SNIPER_EXEC_END_HOUR = 23  # 14:00-23:00 WIB, overnight diizinkan
+
+# --- Intraday Disciplined Mode (M5) ---
+INTRADAY_TIMEFRAME = "M5"
+INTRADAY_EXPIRY_SECONDS = 90  # 1.5 menit (PRD S4: tombol Intraday)
+INTRADAY_MAX_DRIFT = 0.80  # $0.80 toleransi geser harga (Price Drift Guard)
+INTRADAY_TRAILING_DISTANCE = 1.50  # $1.50 di belakang harga
+INTRADAY_SL_ATR_MULT = 1.2  # SL = Swing M5 +/- 1.2 * ATR14 M5
+INTRADAY_ATR_PERIOD = 14
+INTRADAY_MIN_RR = 2.0  # TP minimal 1:2 R:R
+VWAP_RESET_HOUR = 6  # Session VWAP reset 06:00 WIB
+# Jendela entry Intraday: 14:30-17:00 & 19:30-22:30 WIB (PRD S4).
+INTRADAY_SESSIONS = ((14, 30, 17, 0), (19, 30, 22, 30))
+INTRADAY_NO_ENTRY_HOUR = 22
+INTRADAY_NO_ENTRY_MINUTE = 30  # tolak entri >= 22:30 WIB
+INTRADAY_MAX_TRADES_PER_DAY = 3  # kuota 3 trade/hari
+INTRADAY_KILL_LOSS_PCT = 0.02  # kill switch rugi harian >= 2% balance
+FORCE_FLAT_HOUR = 23  # Auto-Flat Intraday 23:00 WIB
+
+
+def expiry_for_mode(mode):
+    """Batas tombol Telegram per mode: 90 dtk Intraday, 300 dtk Sniper."""
+    return (INTRADAY_EXPIRY_SECONDS
+            if str(mode or "").upper() == MODE_INTRADAY
+            else SNIPER_EXPIRY_SECONDS)
+
+
+def drift_for_mode(mode):
+    """Toleransi Price Drift Guard per mode: $0.80 vs $1.50."""
+    return (INTRADAY_MAX_DRIFT
+            if str(mode or "").upper() == MODE_INTRADAY
+            else SNIPER_MAX_DRIFT)
+
+
+def trailing_for_mode(mode):
+    """Jarak trailing per mode: $1.50 vs $2.00."""
+    return (INTRADAY_TRAILING_DISTANCE
+            if str(mode or "").upper() == MODE_INTRADAY
+            else SNIPER_TRAILING_DISTANCE)
 
 # ================= RISK GOVERNOR =================
 # Anti-overtrading untuk router 4-cabang (agregat sinyal lebih sering).
@@ -149,6 +208,35 @@ EXEC_END_HOUR = 23
 
 # ================= DATABASE =================
 DB_NAME = "trading_journal.db"
+DB_PATH = DB_NAME  # alias kompat state_manager lama (PRD V3: state_manager pakai DB_PATH)
+
+
+def is_in_intraday_session(now=None):
+    """True bila now di dalam salah satu jendela Intraday (PRD S4)."""
+    from datetime import datetime as _dt
+
+    try:
+        now = now or _dt.now(LOCAL_TZ)
+        hm = (now.hour, now.minute)
+        for sh, sm, eh, em in INTRADAY_SESSIONS:
+            if (sh, sm) <= hm < (eh, em):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def is_intraday_entry_closed(now=None):
+    """True bila >= 22:30 WIB (PRD 5.1: tolak entri mendekati Auto-Flat)."""
+    from datetime import datetime as _dt
+
+    try:
+        now = now or _dt.now(LOCAL_TZ)
+        return (now.hour > INTRADAY_NO_ENTRY_HOUR
+                or (now.hour == INTRADAY_NO_ENTRY_HOUR
+                    and now.minute >= INTRADAY_NO_ENTRY_MINUTE))
+    except Exception:
+        return False
 
 
 def oanda_base_url(env=None):
